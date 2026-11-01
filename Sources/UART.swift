@@ -1,7 +1,7 @@
 // Copyright (c) 2026 tkagy <248091500+tkagy@users.noreply.github.com>
 // SPDX-License-Identifier: MIT
 
-/// UART0 or UART1 with explicit, pin-map-validated TX/RX GPIOs, 115200 baud / 8N1.
+/// UART0 or UART1 with explicit, pin-map-validated TX/RX GPIOs and baud rate, 8N1.
 /// Call Clock.initialize() before initialize().
 // RP2040 datasheet: 4.2.8 UART registers; 2.19.6.1 IO - User Bank;
 // 2.19.6.3 Pad Control - User Bank; 2.14 Subsystem Resets; 1.4.3 GPIO Functions.
@@ -14,6 +14,7 @@ struct UART {
         case none = 0
         case resetDidNotComplete = 1
         case invalidPins = 2
+        case invalidBaudRate = 3
     }
 
     enum Port {
@@ -56,7 +57,6 @@ struct UART {
         }
     }
 
-    private static let baudRate: UInt32 = 115_200
     private static let resetReleasePollLimit: UInt32 = 1_000_000
 
     // Retain diagnostics per hardware port, even if initialize() never returns.
@@ -76,9 +76,11 @@ struct UART {
     }
 
     let port: Port
-    // No pins are selected until initialize(tx:rx:) succeeds.
+    // No configuration is retained until initialize(tx:rx:baudRate:) succeeds.
     private(set) var transmitPin: UInt32? = nil
     private(set) var receivePin: UInt32? = nil
+    // Requested baud rate; the hardware divider may introduce rounding error.
+    private(set) var baudRate: UInt32? = nil
     private var registers: Registers
 
     private var resetMask: UInt32 {
@@ -210,12 +212,12 @@ struct UART {
         registers = Registers(base: port == .uart0 ? Chip.UART0.base : Chip.UART1.base)
     }
 
-    /// Return a UART initialized with the selected TX/RX pins. Store the returned
-    /// value to retain its pin configuration. Status is shared by all handles for the port.
+    /// Return a UART initialized with the selected TX/RX pins and baud rate. Store the
+    /// returned value to retain its configuration. Status is shared by all handles for the port.
     /// Failures retain their cause in status(for:) before stopping in faultHandler().
-    func initialize(tx: UInt32, rx: UInt32) -> Self {
+    func initialize(tx: UInt32, rx: UInt32, baudRate: UInt32) -> Self {
         var uart = self
-        uart.configure(tx: tx, rx: rx)
+        uart.configure(tx: tx, rx: rx, baudRate: baudRate)
         return uart
     }
 
@@ -254,11 +256,24 @@ struct UART {
         }
     }
 
-    // Invalid pins are rejected before any registers are written.
-    private mutating func configure(tx: UInt32, rx: UInt32) {
+    // Invalid pins and baud rates are rejected before any registers are written.
+    private mutating func configure(tx: UInt32, rx: UInt32, baudRate: UInt32) {
         guard let transmitFuncsel = port.tx.funcsel(for: tx),
               let receiveFuncsel = port.rx.funcsel(for: rx) else {
             status = .invalidPins
+            faultHandler()
+        }
+        // RP2040 4.2.3.1 / RP2350 12.1.3.1: UARTCLK / (16 * baud)
+        // must be between 1 and 65535. Check the rate before dividing or adding it.
+        guard baudRate > 0, baudRate <= Clock.peripheralFrequencyHz / 16 else {
+            status = .invalidBaudRate
+            faultHandler()
+        }
+        // Rounded divisor in units of 1/64: round(clk_peri * 4 / baud).
+        // UInt32 arithmetic fits the configured 12 MHz peripheral clock.
+        let divisor = (Clock.peripheralFrequencyHz * 4 + baudRate / 2) / baudRate
+        guard divisor >= 64, divisor <= 65_535 * 64 else {
+            status = .invalidBaudRate
             faultHandler()
         }
         status = .none
@@ -281,9 +296,7 @@ struct UART {
 
         registers.UARTCR.value = 0
         // RP2040 4.2 UART / RP2350 12.1 UART: same baud-rate generator formula.
-        // Rounded divisor in units of 1/64: round(clk_peri * 4 / baud).
-        // At 12 MHz: IBRD=6, FBRD=33, actual baud approximately 115108.
-        let divisor = (Clock.peripheralFrequencyHz * 4 + Self.baudRate / 2) / Self.baudRate
+        // At 12 MHz and 115200 baud: IBRD=6, FBRD=33, actual baud approximately 115108.
         registers.UARTIBRD.value = divisor / 64
         registers.UARTFBRD.value = divisor % 64
         // WLEN=3: eight bits; FEN=1: FIFO. PEN=0, STP2=0: no parity, one stop bit.
@@ -301,5 +314,6 @@ struct UART {
             | Registers.UARTCR.transmitEnabled | Registers.UARTCR.receiveEnabled
         transmitPin = tx
         receivePin = rx
+        self.baudRate = baudRate
     }
 }

@@ -61,3 +61,32 @@ enum RP2040 {
         static let base: UInt32 = 0x4003_8000
     }
 }
+
+#if RP2040
+// Cortex-M0+ runtime support. @_cdecl entry points must be global functions.
+// __aeabi_uidiv takes two unsigned 32-bit integers and returns their quotient.
+// A zero denominator is handled by __aeabi_idiv0 below.
+// REVISIT: use SIO later
+@_cdecl("__aeabi_uidiv")
+func aeabiUnsignedDivide(_ numerator: UInt32, _ denominator: UInt32) -> UInt32 {
+    guard denominator != 0 else {
+        return UInt32(bitPattern: aeabiIntegerDivideByZero(numerator == 0 ? 0 : -1))
+    }
+    var remainder = numerator
+    var quotient: UInt32 = 0
+    // Build the quotient from its highest bit. Check before shifting to avoid overflow.
+    for shift in (0..<UInt32.bitWidth).reversed() {
+        if denominator <= (remainder >> shift) {
+            remainder -= denominator << shift
+            quotient |= UInt32(1) << shift
+        }
+    }
+    return quotient
+}
+
+// The ABI routes division by zero through this hook. This firmware stops on it.
+@_cdecl("__aeabi_idiv0")
+func aeabiIntegerDivideByZero(_ proposedResult: Int32) -> Int32 {
+    preconditionFailure("Integer division by zero")
+}
+#endif

@@ -85,7 +85,7 @@ enum RP2 {
 
     // Create these explicitly during initialize(), after RAM and clocks are ready.
     // nil is a constant initial value and requires no lazy initializer or atomic helpers.
-    // Use initialize(tx:rx:) to configure pins only for a UART the application uses.
+    // Use initialize(tx:rx:baudRate:) to configure pins only for a UART the application uses.
     static var uart0: UART! = nil
     static var uart1: UART! = nil
 
@@ -94,7 +94,7 @@ enum RP2 {
     static func initialize() -> Never {
         memory.initialize()
         clock.initialize()
-        uart0 = UART(.uart0).initialize(tx: 0, rx: 1)
+        uart0 = UART(.uart0).initialize(tx: 0, rx: 1, baudRate: 115_200)
         main()
     }
 
