@@ -57,7 +57,7 @@ struct UART {
         }
     }
 
-    private static let resetReleasePollLimit: UInt32 = 1_000_000
+    private static let maxPollCount: UInt32 = 1_000_000
 
     // Retain diagnostics per hardware port, even if initialize() never returns.
     // Constant initial values need no heap allocation or lazy initialization.
@@ -283,7 +283,7 @@ struct UART {
         RESETS.RESET.$value.setBits(resetMask)
         RESETS.RESET.$value.clearBits(peripherals)
         var resetReleased = false
-        for _ in 0..<Self.resetReleasePollLimit {
+        for _ in 0..<Self.maxPollCount {
             if RESETS.RESET_DONE.value & peripherals == peripherals {
                 resetReleased = true
                 break

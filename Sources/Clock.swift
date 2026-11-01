@@ -27,7 +27,7 @@ enum Clock {
         / Chip.SystemPLL.postDivider1
         / Chip.SystemPLL.postDivider2
 
-    private static let pollLimit: UInt32 = 1_000_000
+    private static let maxPollCount: UInt32 = 1_000_000
 
     // .none means no error; other cases identify a failure in this module.
     private(set) static var status: ErrorCode = .none
@@ -245,7 +245,7 @@ enum Clock {
 
     // This is a bounded poll count, not a time in milliseconds.
     private static func waitFor(_ read: @autoclosure () -> UInt32, mask: UInt32, value: UInt32) -> Bool {
-        for _ in 0..<pollLimit {
+        for _ in 0..<maxPollCount {
             if read() & mask == value { return true }
         }
         return false
