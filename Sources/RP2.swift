@@ -13,6 +13,9 @@ typealias Chip = RP2350
 
 /// Common firmware entry point for RP-series chips.
 // @main is not required because resetHandler invokes main through reset().
+// This firmware reserves no heap region and performs no heap allocations.
+// Use static storage and stack values instead of dynamically allocated strings.
+
 enum RP2 {
     /// A 32-bit hardware register at a fixed address.
     // RP2040 datasheet, 2.2 "Address Map"; 2.1.2 "Atomic Register Access".
@@ -82,6 +85,7 @@ enum RP2 {
     // Return the type directly, without lazy static storage before RAM is initialized.
     static var memory: Memory.Type { Memory.self }
     static var clock: Clock.Type { Clock.self }
+    static var timer: Timer.Type { Timer.self }
 
     // Create these explicitly during initialize(), after RAM and clocks are ready.
     // nil is a constant initial value and requires no lazy initializer or atomic helpers.
@@ -94,19 +98,23 @@ enum RP2 {
     static func initialize() -> Never {
         memory.initialize()
         clock.initialize()
+        timer.initialize()
         uart0 = UART(.uart0).initialize(tx: 0, rx: 1, baudRate: 115_200)
         main()
     }
 
     static func main() -> Never {
-        // UART test
-        for _ in 0..<100 {
-            uart0.write("Hello World\r\n")
+        var time: UInt32 = 0
+        let interval: UInt32 = 3
+        while true {
+            timer.busyWait(seconds: interval)
+            time += interval
+            // String interpolation (e.g. "time = \(time)") is avoided
+            // because heap allocation is unavailable in this bare-metal environment.
+            uart0.write("Hello World ! time=")
+            uart0.write(time)
+            uart0.write("\r\n")
         }
-        uart0.flush()
-
-        // Main loop
-        while true {}
     }
 
     // The vector table supplies the initial stack pointer: boot2 on RP2040,

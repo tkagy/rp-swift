@@ -30,6 +30,7 @@ enum RP2350 {
     enum Reset {
         static let base: UInt32 = 0x4002_0000
         static let systemPLL: UInt32 = 1 << 14
+        static let timer: UInt32 = 1 << 23 // TIMER0; leave TIMER1 untouched.
         static let uart0: UInt32 = 1 << 26
         static let uart1: UInt32 = 1 << 27
         static let ioBank0: UInt32 = 1 << 6
@@ -75,6 +76,16 @@ enum RP2350 {
             return SYSINFO.PACKAGE_SEL.value & SYSINFO.PACKAGE_SEL.packageMask
                 == SYSINFO.PACKAGE_SEL.qfn80
         }
+    }
+
+    enum Timer {
+        // RP2350 address map, Timer registers, and Tick generator registers.
+        static let base: UInt32 = 0x400B_0000
+        // Dedicated TIMER0 tick generator in the TICKS block.
+        static let tickControl: UInt32 = 0x4010_8018
+        static let tickCycles: UInt32 = 0x4010_801C
+        static let tickEnable: UInt32 = 1 << 0
+        static let tickRunning: UInt32 = 1 << 1
     }
 
     enum UART0 {

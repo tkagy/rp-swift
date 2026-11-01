@@ -256,6 +256,13 @@ struct UART {
         }
     }
 
+    func write(_ value: UInt32) {
+        if value >= 10 {
+            write(value / 10)
+        }
+         write(byte: UInt8(value % 10) + 48)
+    }
+
     // Invalid pins and baud rates are rejected before any registers are written.
     private mutating func configure(tx: UInt32, rx: UInt32, baudRate: UInt32) {
         guard let transmitFuncsel = port.tx.funcsel(for: tx),
