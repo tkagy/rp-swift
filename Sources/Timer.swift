@@ -7,30 +7,54 @@
 // https://datasheets.raspberrypi.com/rp2350/rp2350-datasheet.pdf
 /// Microsecond hardware counter: RP2040 TIMER or RP2350 TIMER0.
 /// Initialize once after Clock.initialize(). Waiting polls the counter on the CPU.
+/// All waits use a counter with one-microsecond resolution. Counter phase can
+/// shorten a relative wait by less than one microsecond; polling overhead and
+/// interrupts can delay return. Waits do not guarantee an exact GPIO pulse width.
 enum Timer {
-    /// Number of microseconds in one second, in the same units as the counter.
-    static let microsecondsPerSecond: UInt64 = 1_000_000
-
     enum ErrorCode: UInt32 {
         case none = 0
         case resetDidNotComplete = 1
         case tickDidNotStart = 2
         case tickDidNotStop = 3
+        case invalidReferenceFrequency = 4
+        case notInitialized = 5
+        case alreadyInitialized = 6
     }
 
+    /// Last register sample from an initialization poll that exhausted its limit.
+    struct FailureSnapshot {
+        let address: UInt32
+        let value: UInt32
+    }
+
+    /// Time conversion constants use the same UInt64 units as the counter.
+    static let microsecondsPerSecond: UInt64 = 1_000_000
+    private static let microsecondsPerMillisecond: UInt64 = 1_000
+
+    /// Largest supported deadline distance in microseconds, in either direction.
+    /// Exactly half the UInt64 counter range is ambiguous and is not supported.
+    static let maximumDeadlineDistance: UInt64 = UInt64(Int64.max)
+
     private(set) static var status: ErrorCode = .none
-    private static let pollLimit: UInt32 = 1_000_000
+    /// Successful driver initialization; this does not monitor hardware clock state.
+    private(set) static var isInitialized: Bool = false
+    /// Nil unless initialization polling failed; captured without an extra MMIO read.
+    private(set) static var failureSnapshot: FailureSnapshot? = nil
+    private static let maxPollCount: UInt32 = 1_000_000
 
     private enum RESETS {
         enum RESET {
             @RP2.Register32(address: Chip.Reset.base) static var value: UInt32
         }
         enum RESET_DONE {
-            @RP2.Register32(address: Chip.Reset.base + 0x08) static var value: UInt32
+            @RP2.Register32(address: Chip.Reset.base + Chip.Reset.doneOffset) static var value: UInt32
         }
     }
 
     private enum TICK {
+        // Both chips use a nine-bit cycle count for the tick generator.
+        static let maxCycles: UInt32 = 0x1FF
+
         enum CTRL {
             @RP2.Register32(address: Chip.Timer.tickControl) static var value: UInt32
         }
@@ -42,97 +66,161 @@ enum Timer {
     }
 
     private enum COUNTER {
-        enum HIGH {
-            @RP2.Register32(address: Chip.Timer.base + 0x24) static var value: UInt32
+        enum TIMERAWH {
+            @RP2.Register32(address: Chip.Timer.base + Chip.Timer.rawHighOffset) static var value: UInt32
         }
-        enum LOW {
-            @RP2.Register32(address: Chip.Timer.base + 0x28) static var value: UInt32
+        enum TIMERAWL {
+            @RP2.Register32(address: Chip.Timer.base + Chip.Timer.rawLowOffset) static var value: UInt32
         }
         enum DBGPAUSE {
-            @RP2.Register32(address: Chip.Timer.base + 0x2C) static var value: UInt32
+            @RP2.Register32(address: Chip.Timer.base + Chip.Timer.debugPauseOffset) static var value: UInt32
+            static let core0: UInt32 = 1 << 1
+            static let core1: UInt32 = 1 << 2
         }
         #if RP2350
         enum SOURCE {
-            @RP2.Register32(address: Chip.Timer.base + 0x38) static var value: UInt32
+            @RP2.Register32(address: Chip.Timer.base + Chip.Timer.sourceOffset) static var value: UInt32
+            static let referenceTicks: UInt32 = 0
         }
         #endif
     }
 
-    static func initialize() {
+    /// Call once during startup, before other cores or interrupts use this timer.
+    /// On RP2040, call before starting the watchdog: setup stops and reconfigures
+    /// their shared tick generator. This function does not start the watchdog.
+    /// By default, pause the counter while either core is halted by a debugger.
+    /// Pass false to keep counting during debugger halts.
+    static func initialize(pauseOnDebug: Bool = true) {
+        guard !isInitialized else { fail(.alreadyInitialized) }
         status = .none
+        failureSnapshot = nil
         // clk_ref is the 12 MHz XOSC. Twelve cycles produce one microsecond.
         let cycles = Clock.referenceFrequencyHz / UInt32(microsecondsPerSecond)
-        precondition(cycles > 0 && cycles <= 0x1FF)
-        precondition(Clock.referenceFrequencyHz % UInt32(microsecondsPerSecond) == 0)
+        guard cycles > 0 && cycles <= TICK.maxCycles,
+              Clock.referenceFrequencyHz % UInt32(microsecondsPerSecond) == 0 else {
+            fail(.invalidReferenceFrequency)
+        }
 
         // Reset only this timer, then establish its reference before releasing it.
         RESETS.RESET.$value.setBits(Chip.Reset.timer)
-        TICK.CTRL.value = 0
-        guard waitForTick(running: false) else {
-            status = .tickDidNotStop
-            faultHandler()
+        configureTick(cycles: cycles)
+        RESETS.RESET.$value.clearBits(Chip.Reset.timer)
+        guard waitForResetRelease() else { fail(.resetDidNotComplete) }
+        #if RP2350
+        COUNTER.SOURCE.value = COUNTER.SOURCE.referenceTicks
+        #endif
+        COUNTER.DBGPAUSE.value = pauseOnDebug
+            ? (COUNTER.DBGPAUSE.core0 | COUNTER.DBGPAUSE.core1)
+            : 0
+        isInitialized = true
+    }
+
+    /// Read the full counter without a shared latch, including a low-word rollover.
+    /// Reading before initialization records an error and calls faultHandler().
+    static var microseconds: UInt64 {
+        guard isInitialized else { fail(.notInitialized) }
+        while true {
+            let high = COUNTER.TIMERAWH.value
+            let low = COUNTER.TIMERAWL.value
+            if high == COUNTER.TIMERAWH.value {
+                return (UInt64(high) << UInt32.bitWidth) | UInt64(low)
+            }
         }
+    }
+
+    /// Wait for elapsed counter ticks, including a UInt64 counter wrap.
+    /// The timer must be initialized and running; a zero duration returns immediately.
+    /// Counter phase can shorten the wait by less than one microsecond.
+    /// Polling overhead and interrupts can delay return beyond the requested duration.
+    static func busyWait(microseconds: UInt64) {
+        guard microseconds > 0 else { return }
+        let start = self.microseconds
+        // Wrapping subtraction measures elapsed time without an overflowing deadline.
+        while self.microseconds &- start < microseconds {}
+    }
+
+    /// Relative wait with the same resolution and timing limits as busyWait(microseconds:).
+    static func busyWait(milliseconds: UInt32) {
+        busyWait(microseconds: UInt64(milliseconds) * microsecondsPerMillisecond)
+    }
+
+    /// Relative wait with the same resolution and timing limits as busyWait(microseconds:).
+    static func busyWait(seconds: UInt32) {
+        busyWait(microseconds: UInt64(seconds) * microsecondsPerSecond)
+    }
+
+    /// Check an absolute Timer.microseconds deadline without waiting for it.
+    /// Returns true when the deadline is reached or already past, including wrap.
+    /// The deadline must be at most maximumDeadlineDistance away in either direction.
+    /// Exactly half the UInt64 counter range cannot distinguish past from future.
+    /// Requires initialization. The result reflects the sampled counter value.
+    static func hasReached(deadline: UInt64) -> Bool {
+        hasReached(deadline: deadline, at: self.microseconds)
+    }
+
+    /// Compare a deadline with a supplied sample from the same Timer counter.
+    /// This overload only compares values; it does not read hardware or require
+    /// initialization. Reuse one sample to evaluate multiple deadlines consistently.
+    /// The deadline must be at most maximumDeadlineDistance from the sample in
+    /// either direction; exactly half the UInt64 counter range is unsupported.
+    static func hasReached(deadline: UInt64, at microseconds: UInt64) -> Bool {
+        let remaining = deadline &- microseconds
+        // The upper half of a wrapping difference represents a past deadline.
+        return remaining == 0 || remaining > maximumDeadlineDistance
+    }
+
+    /// Wait until an absolute Timer.microseconds value, including counter wrap.
+    /// Returns immediately if the deadline is reached or already past.
+    /// The deadline must be at most maximumDeadlineDistance away in either direction.
+    /// Exactly half the UInt64 counter range cannot distinguish past from future.
+    /// Requires initialization even when the deadline has already passed.
+    /// Counter resolution is one microsecond; polling overhead and interrupts
+    /// can delay return after the deadline is reached.
+    static func busyWait(until deadline: UInt64) {
+        while !hasReached(deadline: deadline) {}
+    }
+
+    // MARK: - Initialization helpers
+
+    private static func configureTick(cycles: UInt32) {
+        TICK.CTRL.value = 0
+        guard waitForTick(running: false) else { fail(.tickDidNotStop) }
         #if RP2350
         TICK.CYCLES.value = cycles
         TICK.CTRL.value = Chip.Timer.tickEnable
         #else
-        // RP2040 stores the cycle count and enable bit in the same register.
-        // This also sets the watchdog's reference tick, without enabling its watchdog.
+        // RP2040 shares this reference tick with the watchdog. Do not change its
+        // period while the watchdog is active; this does not enable the watchdog.
         TICK.CTRL.value = cycles | Chip.Timer.tickEnable
         #endif
-        guard waitForTick(running: true) else {
-            status = .tickDidNotStart
-            faultHandler()
-        }
-
-        RESETS.RESET.$value.clearBits(Chip.Reset.timer)
-        var ready = false
-        for _ in 0..<pollLimit {
-            if RESETS.RESET_DONE.value & Chip.Reset.timer != 0 {
-                ready = true
-                break
-            }
-        }
-        guard ready else {
-            status = .resetDidNotComplete
-            faultHandler()
-        }
-        #if RP2350
-        COUNTER.SOURCE.value = 0 // Count reference ticks rather than clk_sys cycles.
-        #endif
-        // Pause while either core is halted by a debugger; resume without catching up.
-        COUNTER.DBGPAUSE.value = (1 << 1) | (1 << 2)
+        guard waitForTick(running: true) else { fail(.tickDidNotStart) }
     }
 
     private static func waitForTick(running: Bool) -> Bool {
-        for _ in 0..<pollLimit {
-            if (TICK.CTRL.value & Chip.Timer.tickRunning != 0) == running { return true }
+        waitForRegister(TICK.CTRL.$value, mask: Chip.Timer.tickRunning,
+                        expected: running ? Chip.Timer.tickRunning : 0)
+    }
+
+    private static func waitForResetRelease() -> Bool {
+        waitForRegister(RESETS.RESET_DONE.$value, mask: Chip.Reset.timer,
+                        expected: Chip.Reset.timer)
+    }
+
+    /// Poll a masked register value; expected must contain only bits within mask.
+    private static func waitForRegister(
+        _ register: RP2.Register32, mask: UInt32, expected: UInt32
+    ) -> Bool {
+        var lastValue: UInt32 = 0
+        for _ in 0..<maxPollCount {
+            lastValue = register.value
+            if lastValue & mask == expected { return true }
         }
+        failureSnapshot = FailureSnapshot(address: register.address, value: lastValue)
         return false
     }
 
-    /// Read the full counter without a shared latch, including a low-word rollover.
-    static var microseconds: UInt64 {
-        while true {
-            let high = COUNTER.HIGH.value
-            let low = COUNTER.LOW.value
-            if high == COUNTER.HIGH.value {
-                return (UInt64(high) << 32) | UInt64(low)
-            }
-        }
+    private static func fail(_ error: ErrorCode) -> Never {
+        status = error
+        faultHandler()
     }
-
-    static func busyWait(microseconds: UInt64) {
-        let deadline = self.microseconds + microseconds
-        while self.microseconds < deadline {}
-    }
-
-    static func busyWait(milliseconds: UInt32) {
-        busyWait(microseconds: UInt64(milliseconds) * 1_000)
-    }
-
-    static func busyWait(seconds: UInt32) {
-        busyWait(microseconds: UInt64(seconds) * 1_000_000)
-    }
-
 }

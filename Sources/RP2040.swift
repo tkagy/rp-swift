@@ -29,6 +29,7 @@ enum RP2040 {
 
     enum Reset {
         static let base: UInt32 = 0x4000_C000
+        static let doneOffset: UInt32 = 0x08
         static let systemPLL: UInt32 = 1 << 12
         static let timer: UInt32 = 1 << 21
         static let uart0: UInt32 = 1 << 22
@@ -56,6 +57,9 @@ enum RP2040 {
 
     enum Timer {
         static let base: UInt32 = 0x4005_4000
+        static let rawHighOffset: UInt32 = 0x24
+        static let rawLowOffset: UInt32 = 0x28
+        static let debugPauseOffset: UInt32 = 0x2C
         // WATCHDOG.TICK supplies the shared watchdog/timer reference tick.
         static let tickControl: UInt32 = 0x4005_802C
         static let tickEnable: UInt32 = 1 << 9

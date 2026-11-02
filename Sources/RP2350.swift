@@ -29,6 +29,7 @@ enum RP2350 {
 
     enum Reset {
         static let base: UInt32 = 0x4002_0000
+        static let doneOffset: UInt32 = 0x08
         static let systemPLL: UInt32 = 1 << 14
         static let timer: UInt32 = 1 << 23 // TIMER0; leave TIMER1 untouched.
         static let uart0: UInt32 = 1 << 26
@@ -81,6 +82,10 @@ enum RP2350 {
     enum Timer {
         // RP2350 address map, Timer registers, and Tick generator registers.
         static let base: UInt32 = 0x400B_0000
+        static let rawHighOffset: UInt32 = 0x24
+        static let rawLowOffset: UInt32 = 0x28
+        static let debugPauseOffset: UInt32 = 0x2C
+        static let sourceOffset: UInt32 = 0x38
         // Dedicated TIMER0 tick generator in the TICKS block.
         static let tickControl: UInt32 = 0x4010_8018
         static let tickCycles: UInt32 = 0x4010_801C
