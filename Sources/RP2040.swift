@@ -9,6 +9,8 @@
 // 8.2 XOSC, 8.6 PLL, 9 GPIO, 12.1 UART.
 // https://datasheets.raspberrypi.com/rp2350/rp2350-datasheet.pdf
 enum RP2040 {
+    static let name: StaticString = "RP2040"
+
     enum XOSC {
         static let base: UInt32 = 0x4002_4000
     }
@@ -68,6 +70,64 @@ enum RP2040 {
 
     enum UART1 {
         static let base: UInt32 = 0x4003_8000
+    }
+
+    /// RP2040 datasheet 2.8 Bootrom, 2.13 PSM, and 4.7 Watchdog.
+    /// ROM API: reset_usb_boot ('U', 'B'); no SDK implementation is linked.
+    enum BootControl {
+        private typealias USBBoot = @convention(c) (UInt32, UInt32) -> Void
+        // AAPCS32 returns data/code pointers alike in r0. Receive the ROM result
+        // as a nullable C function pointer, rather than casting a second UInt.
+        // The function table supplies the Thumb bit; NULL means not found.
+        private typealias Lookup = @convention(c) (UInt, UInt32) -> USBBoot?
+
+        private static let functionTablePointer = UInt(0x14)
+        private static let lookupPointer = UInt(0x18)
+        private static let usbBootCode: UInt32 = 0x55 | (0x42 << 8) // 'U', 'B'
+        private static let thumbBit = UInt(1)
+        private static let watchdogBase: UInt32 = 0x4005_8000
+        private static let psmBase: UInt32 = 0x4001_0000
+        private static let watchdogTrigger: UInt32 = 1 << 31
+        private static let watchdogResetDomains: UInt32 = (1 << 17) - 1
+        private static let oscillatorDomains: UInt32 = (1 << 0) | (1 << 1)
+
+        private enum WATCHDOG {
+            @RP2.Register32(address: watchdogBase) static var control: UInt32
+            // SCRATCH4 = SCRATCH0 (0x0c) + four words. Zero selects normal boot.
+            @RP2.Register32(address: watchdogBase + 0x1C) static var scratch4: UInt32
+        }
+        private enum PSM {
+            @RP2.Register32(address: psmBase + 0x08) static var watchdogSelect: UInt32
+        }
+
+        /// Read a 16-bit pointer stored at a fixed, aligned boot ROM address.
+        private static func readROMPointer(at address: UInt) -> UInt {
+            let pointer = UnsafePointer<UInt16>(bitPattern: address)!
+            return UInt(pointer.pointee)
+        }
+
+        /// Enter USB BOOTSEL. Success does not return; false means ROM lookup failed.
+        static func enterBOOTSEL() -> Bool {
+            // ROM root entries contain 16-bit addresses, including the Thumb bit.
+            let lookupAddress = readROMPointer(at: lookupPointer)
+            let table = readROMPointer(at: functionTablePointer)
+            guard lookupAddress & thumbBit != 0, table != 0 else { return false }
+            let lookup = unsafeBitCast(lookupAddress, to: Lookup.self)
+            guard let usbBoot = lookup(table, usbBootCode) else { return false }
+            // No activity GPIO; enable both USB mass storage and PICOBOOT.
+            usbBoot(0, 0)
+            return false
+        }
+
+        /// Restart through the normal flash boot path. Success does not return.
+        static func reset() -> Bool {
+            WATCHDOG.control = 0
+            WATCHDOG.scratch4 = 0
+            // Reset both cores and peripherals, keeping ROSC/XOSC running.
+            PSM.watchdogSelect = watchdogResetDomains & ~oscillatorDomains
+            WATCHDOG.control = watchdogTrigger
+            while true {}
+        }
     }
 }
 

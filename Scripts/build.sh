@@ -75,7 +75,7 @@ if [[ "$CHIP" == RP2040 ]]; then
     # License: BSD-3-Clause. The binary is fetched at build time, not vendored here.
     # Pin the commit so downloads are reproducible and the verifier checks a known blob.
     BOOT2_COMMIT=b46a77eb4406c4d06837345bdad2f906d483b73f
-    # Keep the downloaded blob beside the RP2040 build intermediates only while needed.
+    # Retain the downloaded blob beside the RP2040 build intermediates for reuse.
     BOOT2_DIR="$BUILD_DIR"
     BOOT2_BIN="$BOOT2_DIR/boot2_w25q080.padded.bin"
     BOOT2_URL="https://raw.githubusercontent.com/rp-rs/rp2040-boot2/$BOOT2_COMMIT/bin/boot2_w25q080.padded.bin"
@@ -96,7 +96,6 @@ if [[ "$CHIP" == RP2040 ]]; then
     llvm-objcopy -I binary -O elf32-littlearm -B arm \
         --rename-section .data=.boot2,alloc,load,readonly,data,contents \
         "$BOOT2_BIN" "$BUILD_DIR/boot2.o"
-    rm -f -- "$BOOT2_BIN"
     LINK_OBJECTS+=("$BUILD_DIR/boot2.o")
 fi
 

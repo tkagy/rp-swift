@@ -24,10 +24,11 @@
 ENTRY(rp2_reset)
 
 /* Resolve only the memory helper names used by the current firmware.
-   memcpy shares the Arm ABI argument order; its return value is ignored.
+   memcpy/memmove share the Arm ABI argument order; their return values are ignored.
    memclr4 shares the zero-fill adapter. Add further aliases only when needed. */
 PROVIDE(__aeabi_memcpy = memcpy);
 PROVIDE(__aeabi_memcpy4 = memcpy);
+PROVIDE(__aeabi_memmove = memmove);
 PROVIDE(__aeabi_memclr4 = __aeabi_memclr);
 
 /* Addresses and SRAM size are RP2040 specifications. The flash region size is a project configuration. */

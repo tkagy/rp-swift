@@ -9,7 +9,7 @@
 // RP2350 datasheet: 12.1.8 UART registers; 9.11.1 IO - User Bank;
 // 9.11.3 Pad Control - User Bank; 7.5.3 Reset registers; 1.2.3 GPIO functions.
 // https://datasheets.raspberrypi.com/rp2350/rp2350-datasheet.pdf
-struct UART {
+struct UART: ConsoleTransport {
     enum ErrorCode: UInt32 {
         case none = 0
         case resetDidNotComplete = 1
@@ -229,12 +229,23 @@ struct UART {
         }
     }
 
+    /// UART uses direct register I/O and needs no background transport work.
+    func poll() {}
+
     /// Read without waiting, or return nil if RX is empty. UARTDR bits [7:0]
     /// contain data; [11:8] preserve overrun/break/parity/framing error flags.
     // RP2040 4.2.8 / RP2350 12.1.8: UARTFR.RXFE and UARTDR have the same layout.
     func read() -> UInt32? {
         if registers.UARTFR.value & Registers.UARTFR.receiveEmpty != 0 { return nil }
         return registers.UARTDR.value
+    }
+
+    /// Read a console byte, discarding bytes carrying UART receive errors.
+    func readByte() -> UInt8? {
+        guard let received = read() else { return nil }
+        let receiveErrorMask: UInt32 = 0xF << 8
+        guard received & receiveErrorMask == 0 else { return nil }
+        return UInt8(truncatingIfNeeded: received)
     }
 
     /// Wait for the FIFO and shift register to finish transmitting (BUSY=0).

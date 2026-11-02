@@ -86,12 +86,7 @@ enum RP2 {
     static var memory: Memory.Type { Memory.self }
     static var clock: Clock.Type { Clock.self }
     static var timer: Timer.Type { Timer.self }
-
-    // Create these explicitly during initialize(), after RAM and clocks are ready.
-    // nil is a constant initial value and requires no lazy initializer or atomic helpers.
-    // Use initialize(tx:rx:baudRate:) to configure pins only for a UART the application uses.
-    static var uart0: UART! = nil
-    static var uart1: UART! = nil
+    static var console: Console.Type { Console.self }
 
     // Run once at startup: RAM must be ready before stored peripheral state is used,
     // and the peripheral clock must be ready before either UART is initialized.
@@ -99,22 +94,14 @@ enum RP2 {
         memory.initialize()
         clock.initialize()
         timer.initialize()
-        uart0 = UART(.uart0).initialize(tx: 0, rx: 1, baudRate: 115_200)
+        console.initialize(name: Chip.name)
+        console.add(UART(.uart0).initialize(tx: 0, rx: 1, baudRate: 115_200))
         main()
     }
 
+    // Main loop
     static func main() -> Never {
-        var time: UInt32 = 0
-        let interval: UInt32 = 3
-        while true {
-            timer.busyWait(seconds: interval)
-            time += interval
-            // String interpolation (e.g. "time = \(time)") is avoided
-            // because heap allocation is unavailable in this bare-metal environment.
-            uart0.write("Hello World ! time=")
-            uart0.write(time)
-            uart0.write("\r\n")
-        }
+        while true { console.poll() }
     }
 
     // The vector table supplies the initial stack pointer: boot2 on RP2040,

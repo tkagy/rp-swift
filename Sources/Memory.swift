@@ -64,6 +64,36 @@ enum Memory {
         return destination
     }
 
+    /// Move count bytes, allowing overlapping regions, and return destination.
+    @inline(never)
+    static func move(_ destination: UnsafeMutableRawPointer, _ source: UnsafeRawPointer, _ count: UInt) -> UnsafeMutableRawPointer {
+        let output = UInt(bitPattern: destination)
+        let input = UInt(bitPattern: source)
+        if count == 0 || output == input { return destination }
+
+        // Subtract ordered addresses instead of adding count to an address, which
+        // could overflow. Disjoint regions can use the existing aligned copy path.
+        let distance = output > input ? output - input : input - output
+        if distance >= count { return copy(destination, source, count) }
+
+        if output < input {
+            // Copy toward higher addresses when the destination precedes source.
+            var index: UInt = 0
+            while index < count {
+                copyByte(destination.advanced(by: Int(index)), source.advanced(by: Int(index)))
+                index &+= 1
+            }
+        } else {
+            // Copy backward so writes cannot overwrite source bytes still needed.
+            var index = count
+            while index > 0 {
+                index &-= 1
+                copyByte(destination.advanced(by: Int(index)), source.advanced(by: Int(index)))
+            }
+        }
+        return destination
+    }
+
     /// Fill count bytes starting at destination with the same byte value.
     /// RAM startup calls this with value = 0 to clear the entire .bss section.
     /// Return the original destination pointer, matching C memset's return value.
@@ -106,7 +136,7 @@ enum Memory {
     }
 
     // Keep individual loads/stores out of line so LLVM cannot turn the optimized
-    // copy/set loops into calls back to memcpy/memset. Word accesses are aligned
+    // copy/move/set loops into calls back to memcpy/memmove/memset. Word accesses are aligned
     // by the callers; byte accesses handle leading, trailing, or unaligned data.
     @inline(never)
     private static func copyByte(_ destination: UnsafeMutableRawPointer, _ source: UnsafeRawPointer) {
@@ -136,6 +166,14 @@ enum Memory {
 @_cdecl("memcpy")
 func memoryCopy(_ destination: UnsafeMutableRawPointer, _ source: UnsafeRawPointer, _ count: UInt) -> UnsafeMutableRawPointer {
     Memory.copy(destination, source, count)
+}
+
+// Arm RTABI32 5.3.4: __aeabi_memmove has the same arguments and overlap semantics
+// as C memmove, but no required return value. The linker aliases it to this entry.
+// https://github.com/ARM-software/abi-aa/blob/main/rtabi32/rtabi32.rst
+@_cdecl("memmove")
+func memoryMove(_ destination: UnsafeMutableRawPointer, _ source: UnsafeRawPointer, _ count: UInt) -> UnsafeMutableRawPointer {
+    Memory.move(destination, source, count)
 }
 
 // __aeabi_memclr4 aliases this adapter, which supplies the zero fill value.

@@ -9,6 +9,8 @@
 // 2.16 XOSC, 2.18 PLL, 2.19 GPIO, 4.2 UART.
 // https://datasheets.raspberrypi.com/rp2040/rp2040-datasheet.pdf
 enum RP2350 {
+    static let name: StaticString = "RP2350"
+
     enum XOSC {
         static let base: UInt32 = 0x4004_8000
     }
@@ -94,5 +96,51 @@ enum RP2350 {
 
     enum UART1 {
         static let base: UInt32 = 0x4007_8000
+    }
+
+    /// RP2350 datasheet 5 Bootrom: Arm Secure ROM lookup and reboot ('R', 'B').
+    /// https://datasheets.raspberrypi.com/rp2350/rp2350-datasheet.pdf
+    /// ABI constants: boot/bootrom_constants.h and boot/picoboot_constants.h.
+    enum BootControl {
+        private typealias Reboot = @convention(c) (UInt32, UInt32, UInt32, UInt32) -> Int32
+        // AAPCS32 returns data/code pointers alike in r0. This binding receives
+        // the ROM result as a nullable C function pointer, with its Thumb bit.
+        private typealias Lookup = @convention(c) (UInt32, UInt32) -> Reboot?
+
+        private static let lookupPointer = UInt(0x16)
+        private static let thumbBit = UInt(1)
+        private static let armSecureFunction: UInt32 = 1 << 2
+        private static let rebootCode: UInt32 = 0x52 | (0x42 << 8) // 'R', 'B'
+        private static let normalBoot: UInt32 = 0
+        private static let usbBoot: UInt32 = 2
+        private static let noReturnOnSuccess: UInt32 = 1 << 8
+        // ROM revisions have a zero-delay reboot erratum; use a nonzero delay.
+        private static let rebootDelayMilliseconds: UInt32 = 1
+
+        /// Read a 16-bit pointer stored at a fixed, aligned boot ROM address.
+        private static func readROMPointer(at address: UInt) -> UInt {
+            let pointer = UnsafePointer<UInt16>(bitPattern: address)!
+            return UInt(pointer.pointee)
+        }
+
+        /// Enter USB BOOTSEL. Success does not return; false means ROM rejected it.
+        static func enterBOOTSEL() -> Bool { reboot(mode: usbBoot) }
+
+        /// Restart through the normal flash boot path, or return false on failure.
+        static func reset() -> Bool { reboot(mode: normalBoot) }
+
+        // This firmware runs Arm Secure. Nonsecure and RISC-V use different APIs.
+        // Success does not return; false means ROM lookup or reboot was rejected.
+        private static func reboot(mode: UInt32) -> Bool {
+            let address = readROMPointer(at: lookupPointer)
+            guard address & thumbBit != 0 else { return false }
+            let lookup = unsafeBitCast(address, to: Lookup.self)
+            guard let reboot = lookup(rebootCode, armSecureFunction) else { return false }
+            let flags = mode | noReturnOnSuccess
+            // BOOTSEL p0=0 enables both USB interfaces, without an activity GPIO.
+            let result = reboot(flags, rebootDelayMilliseconds, 0, 0)
+            guard result == 0 else { return false }
+            while true {}
+        }
     }
 }
