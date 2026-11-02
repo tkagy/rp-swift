@@ -251,14 +251,27 @@ struct UART: ConsoleTransport {
     /// Wait for the FIFO and shift register to finish transmitting (BUSY=0).
     // RP2040 4.2.8 / RP2350 12.1.8: UARTFR.BUSY includes the final stop bit.
     func flush() {
-        while registers.UARTFR.value & Registers.UARTFR.busy != 0 {}
+        while isTransmitting {}
+    }
+
+    /// True while the FIFO or shift register is still transmitting.
+    var isTransmitting: Bool {
+        registers.UARTFR.value & Registers.UARTFR.busy != 0
+    }
+
+    /// Enqueue one byte if FIFO space is available, without waiting.
+    /// False leaves both the FIFO and the supplied byte untouched.
+    @discardableResult
+    func tryWrite(byte: UInt8) -> Bool {
+        guard registers.UARTFR.value & Registers.UARTFR.transmitFull == 0 else { return false }
+        registers.UARTDR.value = UInt32(byte)
+        return true
     }
 
     /// Enqueue a byte, waiting for FIFO space. flush() waits for wire completion.
     // RP2040 4.2.8 / RP2350 12.1.8: UARTFR.TXFF and UARTDR.DATA are shared.
     func write(byte: UInt8) {
-        while registers.UARTFR.value & Registers.UARTFR.transmitFull != 0 {}
-        registers.UARTDR.value = UInt32(byte)
+        while !tryWrite(byte: byte) {}
     }
 
     func write(_ text: StaticString) {

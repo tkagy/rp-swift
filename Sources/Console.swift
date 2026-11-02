@@ -4,13 +4,20 @@
 protocol ConsoleTransport {
     mutating func poll()
     mutating func readByte() -> UInt8?
-    mutating func write(byte: UInt8)
-    mutating func flush()
+    /// Return false without waiting when the transmitter cannot accept a byte.
+    mutating func tryWrite(byte: UInt8) -> Bool
+    var isTransmitting: Bool { get }
 }
 
 /// One console broadcasts its prompt to all attached devices.
+/// Initialize Timer first and call poll frequently from a single execution context.
+/// Output is queued in fixed inline storage; poll never waits for UART TX space.
 enum Console {
     // MARK: - Types
+
+    enum RegistrationResult {
+        case added, alreadyRegistered, full
+    }
 
     // private static var devices: InlineArray<2, (any ConsoleTransport)?> = [nil, nil]
     // Storing Serial Device as any ConsoleTransport introduced heap allocation,
@@ -34,17 +41,15 @@ enum Console {
             }
         }
 
-        func write(byte: UInt8) {
+        func tryWrite(byte: UInt8) -> Bool {
             switch self {
-            case .uart(let uart): uart.write(byte: byte)
-            //case .cdc(let cdc): cdc.write(byte: byte)
+            case .uart(let uart): uart.tryWrite(byte: byte)
             }
         }
 
-        func flush() {
+        var isTransmitting: Bool {
             switch self {
-            case .uart(let uart): uart.flush()
-            //case .cdc(let cdc): cdc.flush()
+            case .uart(let uart): uart.isTransmitting
             }
         }
 
@@ -74,13 +79,131 @@ enum Console {
         static let down: UInt8 = 0x42
         static let firstFinal: UInt8 = 0x40
         static let lastFinal: UInt8 = 0x7E
+        static let firstParameter: UInt8 = 0x30
+        static let lastParameter: UInt8 = 0x3F
+        static let firstIntermediate: UInt8 = 0x20
+        static let lastIntermediate: UInt8 = 0x2F
     }
 
     private enum EscapeState {
         case none, escape, cursor
     }
 
+    private static let escapeTimeoutMicroseconds: UInt64 = 50_000
+    private static let maximumEscapeBytes = 16
+    private static let ioByteBudget = 32
+    // A help response currently needs at most 20 fragments, including its prompt.
+    // Reserve a complete response before consuming input; never discard output.
+    private static let responseFragmentReserve = 24
+
     private typealias LineBytes = InlineArray<32, UInt8>
+
+    private enum OutputFragment {
+        case text(StaticString)
+        case byte(UInt8)
+        case line(LineBytes, Int)
+
+        var count: Int {
+            switch self {
+            case .text(let text): text.utf8CodeUnitCount
+            case .byte: 1
+            case .line(_, let count): count
+            }
+        }
+
+        func byte(at index: Int) -> UInt8 {
+            switch self {
+            case .text(let text): text.utf8Start[index]
+            case .byte(let byte): byte
+            case .line(let bytes, _): bytes[index]
+            }
+        }
+    }
+
+    private struct OutputBuffer {
+        private var fragments = InlineArray<32, OutputFragment?>(repeating: nil)
+        private var head = 0
+        private var count = 0
+        private var offset = 0
+
+        var isEmpty: Bool { count == 0 }
+        var available: Int { fragments.count - count }
+
+        mutating func append(_ fragment: OutputFragment) {
+            guard fragment.count > 0 else { return }
+            precondition(available > 0, "Console output reservation exhausted")
+            fragments[(head + count) % fragments.count] = fragment
+            count += 1
+        }
+
+        mutating func poll(to device: SerialDevice) {
+            var budget = Console.ioByteBudget
+            while count > 0 && budget > 0 {
+                guard let fragment = fragments[head] else { return }
+                guard device.tryWrite(byte: fragment.byte(at: offset)) else { return }
+                budget -= 1
+                offset += 1
+                if offset == fragment.count {
+                    fragments[head] = nil
+                    head = (head + 1) % fragments.count
+                    count -= 1
+                    offset = 0
+                }
+            }
+        }
+    }
+
+    private struct ReceivedByte {
+        let value: UInt8
+        let time: UInt64
+    }
+
+    private struct ReceiveBuffer {
+        private var bytes = InlineArray<128, UInt8>(repeating: 0)
+        private var times = InlineArray<128, UInt64>(repeating: 0)
+        private var head = 0
+        private var count = 0
+        private var skipDiscardedLineFeed = false
+        private(set) var discarding = false
+        var needsOverflowNotice = false
+
+        var isEmpty: Bool { count == 0 }
+
+        mutating func append(_ byte: UInt8, at time: UInt64) {
+            if skipDiscardedLineFeed {
+                skipDiscardedLineFeed = false
+                if byte == Key.lineFeed { return }
+            }
+            if discarding {
+                if byte == Key.carriageReturn || byte == Key.lineFeed {
+                    discarding = false
+                    skipDiscardedLineFeed = byte == Key.carriageReturn
+                }
+                return
+            }
+            guard count < bytes.count else {
+                // Invalidate all queued input rather than executing a truncated command.
+                head = 0
+                count = 0
+                needsOverflowNotice = true
+                discarding = byte != Key.carriageReturn && byte != Key.lineFeed
+                skipDiscardedLineFeed = byte == Key.carriageReturn
+                return
+            }
+            let tail = (head + count) % bytes.count
+            bytes[tail] = byte
+            times[tail] = time
+            count += 1
+        }
+
+        mutating func pop() -> ReceivedByte? {
+            guard count > 0 else { return nil }
+            let byte = ReceivedByte(value: bytes[head], time: times[head])
+            head = (head + 1) % bytes.count
+            count -= 1
+            return byte
+        }
+    }
 
     private struct InputBuffer {
         private(set) var bytes = LineBytes(repeating: 0)
@@ -88,6 +211,9 @@ enum Console {
         private(set) var overflow = false
         var skipLineFeed = false
         var escapeState: EscapeState = .none
+        var escapeDeadline: UInt64? = nil
+        var escapeByteCount = 0
+        var escapeHasIntermediate = false
         var historyOffset: Int? = nil
 
         mutating func append(_ byte: UInt8) -> Bool {
@@ -112,6 +238,13 @@ enum Console {
 
         mutating func clear() {
             self = InputBuffer()
+        }
+
+        mutating func clearEscape() {
+            escapeState = .none
+            escapeDeadline = nil
+            escapeByteCount = 0
+            escapeHasIntermediate = false
         }
 
         mutating func restore(_ entry: History.Entry) {
@@ -222,90 +355,155 @@ enum Console {
 
     // Preserve each device's unfinished input while it browses shared history.
     private static var drafts: InlineArray<2, InputBuffer?> = [nil, nil]
+    private static var outputBuffers: InlineArray<2, OutputBuffer?> = [nil, nil]
+    private static var receiveBuffers: InlineArray<2, ReceiveBuffer?> = [nil, nil]
+    private static var pendingCommands: InlineArray<2, Command?> = [nil, nil]
+    private static var promptRequested: InlineArray<2, Bool> = [false, false]
 
     private static var nextDeviceIndex: Int = 0
     private static var name: StaticString = ""
 
     // MARK: - Public API
 
-    /// Set only the prompt name. Existing device registrations are preserved.
+    /// Set only the prompt name after Timer initialization. Registrations are preserved.
     static func initialize(name: StaticString) {
         self.name = name
     }
 
-    /// Register a transport and send its prompt. Ignore duplicate devices and a full list.
-    static func add(_ device: UART) {
+    /// Register a transport and queue its prompt. Duplicate hardware is not reconfigured.
+    @discardableResult
+    static func add(_ device: UART) -> RegistrationResult {
         add(.uart(device))
     }
 
+    /// Service both ports with bounded RX/TX work. Call frequently to drain queued I/O.
+    /// UART writes must be owned by this console while a port is registered.
     static func poll() {
+        let now = Timer.microseconds
         for index in serialDevices.indices {
-            serialDevices[index]?.poll()
-            if let byte = serialDevices[index]?.readByte() {
-                receive(byte, from: index)
+            guard let device = serialDevices[index] else { continue }
+            device.poll()
+            drainOutput(to: index)
+
+            for _ in 0..<ioByteBudget {
+                guard let byte = device.readByte() else { break }
+                receiveBuffers[index]?.append(byte, at: now)
             }
+
+            if receiveBuffers[index]!.needsOverflowNotice,
+               outputBuffers[index]!.available >= responseFragmentReserve,
+               pendingCommands[index] == nil {
+                inputBuffers[index]?.clear()
+                drafts[index] = nil
+                write("\r\nInput overflow. Line discarded.\r\n", to: index)
+                prompt(to: index)
+                receiveBuffers[index]?.needsOverflowNotice = false
+            }
+
+            if !receiveBuffers[index]!.needsOverflowNotice && pendingCommands[index] == nil {
+                for _ in 0..<ioByteBudget {
+                    guard outputBuffers[index]!.available >= responseFragmentReserve,
+                          let byte = receiveBuffers[index]?.pop() else { break }
+                    receive(byte.value, at: byte.time, from: index)
+                    if pendingCommands[index] != nil { break }
+                }
+            }
+            if receiveBuffers[index]!.isEmpty, var input = inputBuffers[index] {
+                expireEscape(&input, at: now)
+                inputBuffers[index] = input
+            }
+            if promptRequested[index], pendingCommands[index] == nil,
+               outputBuffers[index]!.available >= responseFragmentReserve {
+                if let input = inputBuffers[index] { redraw(input, to: index) }
+                promptRequested[index] = false
+            }
+            drainOutput(to: index)
+            finishPendingCommand(from: index)
         }
     }
 
+    /// Request a redraw on each registered device; poll performs the queued output.
     static func prompt() {
         for index in serialDevices.indices {
             if serialDevices[index] != nil {
-                prompt(to: index)
+                promptRequested[index] = true
             }
         }
     }
 
     // MARK: - Registration and I/O
 
-    private static func add(_ device: SerialDevice) {
-        guard nextDeviceIndex < serialDevices.count else { return }
+    private static func add(_ device: SerialDevice) -> RegistrationResult {
         for index in 0..<nextDeviceIndex {
             if let registered = serialDevices[index], registered.isSameDevice(as: device) {
-                return
+                return .alreadyRegistered
             }
         }
+        guard nextDeviceIndex < serialDevices.count else { return .full }
         serialDevices[nextDeviceIndex] = device
         // Initialize at registration time instead of in the static initializer above.
         inputBuffers[nextDeviceIndex] = InputBuffer()
+        initializeOutput(at: nextDeviceIndex)
+        initializeReceive(at: nextDeviceIndex)
         prompt(to: nextDeviceIndex)
         nextDeviceIndex += 1
+        return .added
+    }
+
+    // Keep large initialization temporaries in separate stack frames. Combining
+    // both constructors in add() exceeded the firmware's 4 KiB stack reservation.
+    @inline(never)
+    private static func initializeOutput(at deviceIndex: Int) {
+        outputBuffers[deviceIndex] = OutputBuffer()
+    }
+
+    @inline(never)
+    private static func initializeReceive(at deviceIndex: Int) {
+        receiveBuffers[deviceIndex] = ReceiveBuffer()
     }
 
     private static func write(_ text: StaticString, to deviceIndex: Int) {
-        for index in 0..<text.utf8CodeUnitCount {
-            serialDevices[deviceIndex]?.write(byte: text.utf8Start[index])
-        }
+        outputBuffers[deviceIndex]?.append(.text(text))
     }
 
-    // Render the prompt and optional input, then flush the complete line once.
+    private static func write(byte: UInt8, to deviceIndex: Int) {
+        outputBuffers[deviceIndex]?.append(.byte(byte))
+    }
+
+    private static func drainOutput(to deviceIndex: Int) {
+        guard let device = serialDevices[deviceIndex] else { return }
+        outputBuffers[deviceIndex]?.poll(to: device)
+    }
+
+    // Queue immutable prompt/input fragments; UART transmission happens in poll().
     private static func prompt(_ input: InputBuffer? = nil, to deviceIndex: Int) {
         write(name, to: deviceIndex)
         write(" >> ", to: deviceIndex)
         if let input = input {
-            for index in 0..<input.count {
-                serialDevices[deviceIndex]?.write(byte: input.bytes[index])
-            }
+            outputBuffers[deviceIndex]?.append(.line(input.bytes, input.count))
         }
-        serialDevices[deviceIndex]?.flush()
     }
 
     // MARK: - Input handling
 
-    private static func receive(_ byte: UInt8, from deviceIndex: Int) {
+    private static func receive(_ byte: UInt8, at time: UInt64, from deviceIndex: Int) {
         guard var input = inputBuffers[deviceIndex] else { return }
         defer { inputBuffers[deviceIndex] = input }
+        expireEscape(&input, at: time)
 
         let skipLineFeed = input.skipLineFeed
         input.skipLineFeed = false
         if byte == Key.lineFeed && skipLineFeed { return }
 
         if byte == Key.carriageReturn || byte == Key.lineFeed {
-            input.escapeState = .none
+            input.clearEscape()
         } else if byte == Key.escape {
+            input.clearEscape()
             input.escapeState = .escape
+            input.escapeDeadline = time &+ escapeTimeoutMicroseconds
             return
-        } else if input.escapeState != .none {
-            receiveEscape(byte, input: &input, from: deviceIndex)
+        } else if input.escapeState != .none,
+                  receiveEscape(byte, input: &input, from: deviceIndex) {
             return
         }
 
@@ -325,12 +523,16 @@ enum Console {
 
         case Key.backspace, Key.delete:
             if input.removeLast() {
+                detachHistory(&input, from: deviceIndex)
                 write("\u{08} \u{08}", to: deviceIndex)
             }
 
         case Key.space...Key.lastPrintable:
             if input.append(byte) {
-                serialDevices[deviceIndex]?.write(byte: byte)
+                detachHistory(&input, from: deviceIndex)
+                write(byte: byte, to: deviceIndex)
+            } else if input.overflow {
+                detachHistory(&input, from: deviceIndex)
             }
 
         default:
@@ -348,25 +550,60 @@ enum Console {
         }
         drafts[deviceIndex] = nil
         input.clear()
-        prompt(to: deviceIndex)
+        if pendingCommands[deviceIndex] == nil { prompt(to: deviceIndex) }
     }
 
-    private static func receiveEscape(_ byte: UInt8, input: inout InputBuffer, from deviceIndex: Int) {
+    private static func expireEscape(_ input: inout InputBuffer, at time: UInt64) {
+        if let deadline = input.escapeDeadline, Timer.hasReached(deadline: deadline, at: time) {
+            input.clearEscape()
+        }
+    }
+
+    // True consumes a sequence byte. False reprocesses the byte as normal input.
+    private static func receiveEscape(_ byte: UInt8, input: inout InputBuffer, from deviceIndex: Int) -> Bool {
         switch input.escapeState {
         case .escape:
-            input.escapeState = byte == Key.csi || byte == Key.ss3 ? .cursor : .none
+            if byte == Key.csi || byte == Key.ss3 {
+                input.escapeState = .cursor
+                return true
+            }
+            input.clearEscape()
+            return false
         case .cursor:
-            // Consume the whole sequence so unsupported keys do not become text.
-            guard byte >= Key.firstFinal && byte <= Key.lastFinal else { return }
-            input.escapeState = .none
+            input.escapeByteCount += 1
+            guard input.escapeByteCount <= maximumEscapeBytes else {
+                input.clearEscape()
+                return false
+            }
+            if byte >= Key.firstParameter && byte <= Key.lastParameter && !input.escapeHasIntermediate {
+                return true
+            }
+            if byte >= Key.firstIntermediate && byte <= Key.lastIntermediate {
+                input.escapeHasIntermediate = true
+                return true
+            }
+            guard byte >= Key.firstFinal && byte <= Key.lastFinal else {
+                input.clearEscape()
+                return false
+            }
+            let hasIntermediate = input.escapeHasIntermediate
+            input.clearEscape()
+            // Consume unsupported sequences without turning their bytes into commands.
+            guard !hasIntermediate else { return true }
             if byte == Key.up {
                 previousHistory(&input, to: deviceIndex)
             } else if byte == Key.down {
                 nextHistory(&input, to: deviceIndex)
             }
+            return true
         case .none:
-            break
+            return false
         }
+    }
+
+    private static func detachHistory(_ input: inout InputBuffer, from deviceIndex: Int) {
+        input.historyOffset = nil
+        drafts[deviceIndex] = nil
     }
 
     private static func remember(_ input: InputBuffer, from deviceIndex: Int) {
@@ -374,8 +611,8 @@ enum Console {
         History.add(input)
 
         // New entries shift the other device's browsing position with its entry.
-        // If that entry is evicted, load and redraw the oldest retained line so
-        // the displayed text and browsing position still refer to the same entry.
+        // If an entry is evicted, retain the displayed line as independent input.
+        // This also avoids writing into the other port's potentially full TX queue.
         for index in inputBuffers.indices where index != deviceIndex {
             guard var otherInput = inputBuffers[index],
                   let offset = otherInput.historyOffset else { continue }
@@ -383,7 +620,7 @@ enum Console {
             if shiftedOffset < History.count {
                 otherInput.historyOffset = shiftedOffset
             } else {
-                showHistory(&otherInput, at: History.count - 1, to: index)
+                detachHistory(&otherInput, from: index)
             }
             inputBuffers[index] = otherInput
         }
@@ -438,12 +675,12 @@ enum Console {
 
         guard let match = match, match.utf8CodeUnitCount <= input.bytes.count else { return }
         // Append only the missing bytes; Tab never executes the command.
+        if input.count < match.utf8CodeUnitCount { detachHistory(&input, from: deviceIndex) }
         while input.count < match.utf8CodeUnitCount {
             let byte = match.utf8Start[input.count]
             guard input.append(byte) else { return }
-            serialDevices[deviceIndex]?.write(byte: byte)
+            write(byte: byte, to: deviceIndex)
         }
-        serialDevices[deviceIndex]?.flush()
     }
 
     private static func showCompletions(_ input: InputBuffer, to deviceIndex: Int) {
@@ -486,19 +723,32 @@ enum Console {
 
     private static func reset(to deviceIndex: Int) {
         write("Resetting...\r\n", to: deviceIndex)
-        // Complete UART transmission before the reset stops the peripheral.
-        serialDevices[deviceIndex]?.flush()
-        if !Chip.BootControl.reset() {
-            write("Reset unavailable or rejected.\r\n", to: deviceIndex)
-        }
+        pendingCommands[deviceIndex] = .reset
     }
 
     private static func bootsel(to deviceIndex: Int) {
         write("Entering USB BOOTSEL mode...\r\n", to: deviceIndex)
-        // Complete UART transmission before handing control to the boot ROM.
-        serialDevices[deviceIndex]?.flush()
-        if !Chip.BootControl.enterBOOTSEL() {
-            write("USB BOOTSEL unavailable or rejected.\r\n", to: deviceIndex)
+        pendingCommands[deviceIndex] = .bootsel
+    }
+
+    private static func finishPendingCommand(from deviceIndex: Int) {
+        guard let command = pendingCommands[deviceIndex],
+              outputBuffers[deviceIndex]!.isEmpty,
+              let device = serialDevices[deviceIndex], !device.isTransmitting else { return }
+        pendingCommands[deviceIndex] = nil
+        // Wait for FIFO and shift-register completion via later polls, never flush().
+        switch command {
+        case .reset:
+            if !Chip.BootControl.reset() {
+                write("Reset unavailable or rejected.\r\n", to: deviceIndex)
+            }
+        case .bootsel:
+            if !Chip.BootControl.enterBOOTSEL() {
+                write("USB BOOTSEL unavailable or rejected.\r\n", to: deviceIndex)
+            }
+        case .help:
+            break
         }
+        prompt(to: deviceIndex)
     }
 }
