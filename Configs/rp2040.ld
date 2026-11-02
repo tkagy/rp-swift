@@ -29,6 +29,7 @@ ENTRY(rp2_reset)
 PROVIDE(__aeabi_memcpy = memcpy);
 PROVIDE(__aeabi_memcpy4 = memcpy);
 PROVIDE(__aeabi_memmove = memmove);
+PROVIDE(__aeabi_memmove4 = memmove);
 PROVIDE(__aeabi_memclr4 = __aeabi_memclr);
 
 /* Addresses and SRAM size are RP2040 specifications. The flash region size is a project configuration. */
