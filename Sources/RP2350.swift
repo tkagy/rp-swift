@@ -106,11 +106,9 @@ enum RP2350 {
     }
 
     enum Timer {
+        // Keep only chip-specific definitions here; shared definitions live in Timer.swift.
         // RP2350 address map, Timer registers, and Tick generator registers.
         static let base: UInt32 = 0x400B_0000
-        static let rawHighOffset: UInt32 = 0x24
-        static let rawLowOffset: UInt32 = 0x28
-        static let debugPauseOffset: UInt32 = 0x2C
         static let sourceOffset: UInt32 = 0x38
         // Dedicated TIMER0 tick generator in the TICKS block.
         static let tickControl: UInt32 = 0x4010_8018
