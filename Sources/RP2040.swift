@@ -56,10 +56,8 @@ enum RP2040 {
     }
 
     enum Timer {
+        // Keep only chip-specific definitions here; shared definitions live in Timer.swift.
         static let base: UInt32 = 0x4005_4000
-        static let rawHighOffset: UInt32 = 0x24
-        static let rawLowOffset: UInt32 = 0x28
-        static let debugPauseOffset: UInt32 = 0x2C
         // WATCHDOG.TICK supplies the shared watchdog/timer reference tick.
         static let tickControl: UInt32 = 0x4005_802C
         static let tickEnable: UInt32 = 1 << 9
