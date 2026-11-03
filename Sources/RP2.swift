@@ -12,7 +12,8 @@ typealias Chip = RP2350
 #endif
 
 /// Common firmware entry point for RP-series chips.
-// @main is not required because resetHandler invokes main through reset().
+// RP2.S initializes RAM/protection and calls Memory.S to paint the stack before rp2_start.
+// No Swift code runs before those steps; @main is not required.
 // This firmware reserves no heap region and performs no heap allocations.
 // Use static storage and stack values instead of dynamically allocated strings.
 
@@ -88,10 +89,9 @@ enum RP2 {
     static var timer: Timer.Type { Timer.self }
     static var console: Console.Type { Console.self }
 
-    // Run once at startup: RAM must be ready before stored peripheral state is used,
-    // and the peripheral clock must be ready before either UART is initialized.
+    // Entered only after assembly startup initializes RAM and protects the stack.
+    // The peripheral clock must be ready before either UART is initialized.
     static func initialize() -> Never {
-        memory.initialize()
         clock.initialize()
         timer.initialize()
         console.initialize(name: Chip.name)
@@ -104,26 +104,22 @@ enum RP2 {
         while true { console.poll() }
     }
 
-    // The vector table supplies the initial stack pointer: boot2 on RP2040,
-    // boot ROM on RP2350. Initialize .bss/.data before main uses stored Swift state.
-    // RP2040 datasheet: 2.8 Bootrom; RP2350 datasheet: 5 Bootrom.
-    // https://datasheets.raspberrypi.com/rp2040/rp2040-datasheet.pdf
-    // https://datasheets.raspberrypi.com/rp2350/rp2350-datasheet.pdf
-    static func reset() -> Never {
-        initialize()
-    }
-
-    static func fault() -> Never {
-        while true {}
-    }
 }
 
-@_cdecl("rp2_reset")
-func resetHandler() -> Never {
-    RP2.reset()
+// The assembly reset entry branches here only after RAM and stack setup succeed.
+// This C-ABI entry never returns to startup code.
+@_cdecl("rp2_start")
+func firmwareStart() -> Never {
+    RP2.initialize()
 }
 
-@_cdecl("rp2_fault")
+// Hardware faults enter RP2.S directly through the vector table, without a
+// Swift prologue. Explicit software failures use this normal-call adapter.
+@_extern(c, "rp2_fault")
+private func stopOnFault()
+
 func faultHandler() -> Never {
-    RP2.fault()
+    stopOnFault()
+    // The assembly entry never returns; express that guarantee to Swift callers.
+    while true {}
 }

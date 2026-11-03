@@ -40,8 +40,8 @@ if [[ "$CHIP_SELECTED" == 0 ]]; then
 fi
 case "$CHIP" in
     # Keep the Swift ABI target and UF2 family matched to the selected chip.
-    RP2040) SWIFT_TARGET=armv6m-none-none-eabi; UF2_FAMILY=rp2040 ;;
-    RP2350) SWIFT_TARGET=armv8m.main-none-none-eabi; UF2_FAMILY=rp2350-arm-s ;;
+    RP2040) SWIFT_TARGET=armv6m-none-none-eabi; ARM_CPU=cortex-m0plus; UF2_FAMILY=rp2040 ;;
+    RP2350) SWIFT_TARGET=armv8m.main-none-none-eabi; ARM_CPU=cortex-m33; UF2_FAMILY=rp2350-arm-s ;;
 esac
 case "$MODE" in
     --print-chip) printf '%s\n' "$CHIP"; exit 0 ;;
@@ -69,6 +69,15 @@ if [[ "$MODE" == --object-only ]]; then
 fi
 
 LINK_OBJECTS=("$SWIFT_OBJECT")
+# Assemble startup/fault handling separately from memory primitives/diagnostics.
+# --object-only emits only the Swift object. The asm- prefix distinguishes
+# assembly outputs from Swift's RP2.o.
+for ASSEMBLY_NAME in RP2 Memory; do
+    ASSEMBLY_OBJECT="$BUILD_DIR/asm-$ASSEMBLY_NAME.o"
+    clang -target arm-none-eabi -mcpu="$ARM_CPU" -mthumb -D "$CHIP" \
+        -c "$PROJECT_DIR/Sources/$ASSEMBLY_NAME.S" -o "$ASSEMBLY_OBJECT"
+    LINK_OBJECTS+=("$ASSEMBLY_OBJECT")
+done
 if [[ "$CHIP" == RP2040 ]]; then
     # Download the W25Q080 boot2 with SPI clock divisor 2 from rp-rs v0.3.0.
     # Upstream: https://github.com/rp-rs/rp2040-boot2/tree/v0.3.0
@@ -104,6 +113,35 @@ ld.lld -T "$PROJECT_DIR/Configs/${CHIP,,}.ld" \
     --gc-sections --build-id=none \
     -Map="$BUILD_DIR/RP2.map" \
     "${LINK_OBJECTS[@]}" -o "$BUILD_DIR/RP2.elf"
+
+# Report the selected linker's SRAM allocation, not instantaneous stack usage.
+# Read symbol values from the linked ELF rather than duplicating chip capacities.
+SRAM_SYMBOL_TABLE=$(llvm-nm --defined-only --format=posix "$BUILD_DIR/RP2.elf")
+declare -A SRAM_SYMBOLS=()
+while read -r SYMBOL_NAME SYMBOL_TYPE SYMBOL_VALUE SYMBOL_REST; do
+    case "$SYMBOL_NAME" in
+        SRAM_BASE|SRAM_BYTES|__bss_end|STACK_TOP|STACK_GUARD_BOTTOM)
+            SRAM_SYMBOLS["$SYMBOL_NAME"]=$((16#$SYMBOL_VALUE))
+            ;;
+    esac
+done <<< "$SRAM_SYMBOL_TABLE"
+for SYMBOL_NAME in SRAM_BASE SRAM_BYTES __bss_end STACK_TOP STACK_GUARD_BOTTOM; do
+    if [[ -z "${SRAM_SYMBOLS[$SYMBOL_NAME]+present}" ]]; then
+        printf 'Missing SRAM layout symbol: %s\n' "$SYMBOL_NAME" >&2
+        exit 1
+    fi
+done
+SRAM_TOTAL_BYTES=${SRAM_SYMBOLS[SRAM_BYTES]}
+SRAM_STATIC_BYTES=$(( ${SRAM_SYMBOLS[__bss_end]} - ${SRAM_SYMBOLS[SRAM_BASE]} ))
+SRAM_RESERVED_BYTES=$(( ${SRAM_SYMBOLS[STACK_TOP]} - ${SRAM_SYMBOLS[STACK_GUARD_BOTTOM]} ))
+SRAM_ALLOCATED_BYTES=$((SRAM_STATIC_BYTES + SRAM_RESERVED_BYTES))
+SRAM_REMAINING_BYTES=$((SRAM_TOTAL_BYTES - SRAM_ALLOCATED_BYTES))
+printf 'SRAM allocation (%s, bytes):\n' "$CHIP"
+printf '  Total:       %d\n' "$SRAM_TOTAL_BYTES"
+printf '  Static:      %d\n' "$SRAM_STATIC_BYTES"
+printf '  Stack/guard: %d\n' "$SRAM_RESERVED_BYTES"
+printf '  Allocated:   %d\n' "$SRAM_ALLOCATED_BYTES"
+printf '  Remaining:   %d\n' "$SRAM_REMAINING_BYTES"
 
 # Convert the linked ELF to UF2 using the matching family identifier.
 picotool uf2 convert "$BUILD_DIR/RP2.elf" "$BUILD_DIR/RP2.uf2" --family "$UF2_FAMILY"

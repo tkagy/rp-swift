@@ -24,16 +24,19 @@
    K / M: 1024 / 1024*1024 bytes. */
 ENTRY(rp2_reset)
 
-/* Resolve only the memory helper names used by the current firmware.
-   memcpy/memmove share the Arm ABI argument order; their return values are ignored.
-   memclr4/8 share the zero-fill adapter. Add further aliases only when needed. */
+/* Memory.S provides the C primitives and Arm fill/clear adapters.
+   Copy/move helpers share the C argument order; return values are ignored.
+   Arm memset reverses count/value, so its aligned names must use the adapter. */
 PROVIDE(__aeabi_memcpy = memcpy);
 PROVIDE(__aeabi_memcpy4 = memcpy);
 PROVIDE(__aeabi_memcpy8 = memcpy);
 PROVIDE(__aeabi_memmove = memmove);
 PROVIDE(__aeabi_memmove4 = memmove);
+PROVIDE(__aeabi_memmove8 = memmove);
 PROVIDE(__aeabi_memclr4 = __aeabi_memclr);
 PROVIDE(__aeabi_memclr8 = __aeabi_memclr);
+PROVIDE(__aeabi_memset4 = __aeabi_memset);
+PROVIDE(__aeabi_memset8 = __aeabi_memset);
 
 /* Addresses are chip specifications. The flash region size is a project configuration. */
 FLASH_BASE = 0x10000000; /* XIP: start of the CPU address window for external flash */
@@ -63,8 +66,12 @@ MEMORY {
 }
 STACK_TOP = ORIGIN(RAM) + LENGTH(RAM); /* 0x20082000: just past SRAM, aligned to 8 bytes */
 
-/* Project policy: reserve the top 4 KiB of SRAM for the stack; this is not a chip requirement. */
-STACK_RESERVED_BYTES = 4K;
+/* The top 8 KiB is stack space. rp2_reset sets MSPLIM to STACK_BOTTOM before Swift.
+   The CPU checks stack-pointer updates; no separate MPU guard is required. */
+STACK_RESERVED_BYTES = 8K;
+STACK_BOTTOM = STACK_TOP - STACK_RESERVED_BYTES;
+STACK_GUARD_BYTES = 0;
+STACK_GUARD_BOTTOM = STACK_BOTTOM;
 
 SECTIONS {
     /* Section 5.9.5.1: without a VECTOR_TABLE item, ROM uses the image start.
@@ -142,8 +149,8 @@ SECTIONS {
     .got : ALIGN(4) { *(.got .got.*) } > FLASH
 
     /* .data stores initial values for RAM variables, such as count = 123.
-       Store their initial bytes in flash; resetHandler copies them to RAM.
-       .bss contains zero-initialized variables; resetHandler fills this range with zero.
+       Store their initial bytes in flash; rp2_reset copies them to RAM.
+       .bss contains zero-initialized variables; rp2_reset fills this range with zero.
        Align each boundary to four bytes so startup can copy or clear one UInt32 at a time.
        The boundary symbols name addresses; they do not allocate additional RAM variables. */
     .data : ALIGN(4) {
@@ -165,8 +172,18 @@ SECTIONS {
     /DISCARD/ : { *(.comment) *(.note*) *(.swift_modhash) *(.swift1_autolink_entries) }
     /* Keep initialized globals below the reserved stack area.
        Startup must not clear or overwrite the stack it is already using. */
-    ASSERT(__bss_end <= STACK_TOP - STACK_RESERVED_BYTES,
-           "RAM globals overlap the reserved 4 KiB stack")
+    ASSERT(__bss_end <= STACK_BOTTOM,
+           "RAM globals overlap the reserved stack area")
+    /* Fixed layout checks belong here; reset checks only the actual boot MSP
+       and protection hardware. Reject bad layouts before producing firmware. */
+    ASSERT(STACK_BOTTOM < STACK_TOP, "Stack reservation must not be empty")
+    ASSERT(STACK_GUARD_BOTTOM >= ORIGIN(RAM) && STACK_GUARD_BOTTOM <= STACK_BOTTOM,
+           "Stack guard must lie in SRAM below the stack")
+    ASSERT((STACK_TOP & 7) == 0 && (STACK_BOTTOM & 7) == 0,
+           "Stack bounds must be 8-byte aligned")
+
+    ASSERT(STACK_GUARD_BOTTOM == STACK_BOTTOM,
+           "RP2350 uses MSPLIM without a separate stack guard")
 
     /* Four bytes per word: detect missing core exception or external IRQ entries. */
     ASSERT(SIZEOF(.vectors) == (16 + 52) * 4, "Unexpected RP2350 vector table size")

@@ -11,6 +11,8 @@
 enum RP2040 {
     static let name: StaticString = "RP2040"
 
+    // Assembly MPU definitions live in the RP2040 block of Sources/Memory.S.
+
     enum XOSC {
         static let base: UInt32 = 0x4002_4000
     }
