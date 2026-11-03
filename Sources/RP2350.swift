@@ -11,6 +11,30 @@
 enum RP2350 {
     static let name: StaticString = "RP2350"
 
+    /// SIO differences; common register definitions live in SIO.swift.
+    enum SIO {
+        static let highOutputOffset: UInt32 = 0x14
+        static let outputSetOffset: UInt32 = 0x18
+        static let highOutputSetOffset: UInt32 = 0x1C
+        static let outputClearOffset: UInt32 = 0x20
+        static let highOutputClearOffset: UInt32 = 0x24
+        static let outputXorOffset: UInt32 = 0x28
+        static let highOutputXorOffset: UInt32 = 0x2C
+        static let outputEnableOffset: UInt32 = 0x30
+        static let highOutputEnableOffset: UInt32 = 0x34
+        static let outputEnableSetOffset: UInt32 = 0x38
+        static let highOutputEnableSetOffset: UInt32 = 0x3C
+        static let outputEnableClearOffset: UInt32 = 0x40
+        static let highOutputEnableClearOffset: UInt32 = 0x44
+        static let outputEnableXorOffset: UInt32 = 0x48
+        static let gpioMask: UInt32 = UInt32.max
+        static let highGPIOMask: UInt32 = 0xFFFF
+        static let qspiShift: UInt32 = 26
+        static let fifoDepth: UInt32 = 4
+        // RP2350-E2: only locks without writable aliases at +0x80 are allowed.
+        static let usableSpinlocks: UInt32 = (1 << 5) | (1 << 6) | (1 << 7) | (1 << 10) | (1 << 11) | (UInt32.max << 18)
+    }
+
     enum XOSC {
         static let base: UInt32 = 0x4004_8000
     }

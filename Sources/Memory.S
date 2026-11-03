@@ -1,7 +1,7 @@
 // Copyright (c) 2026 tkagy <248091500+tkagy@users.noreply.github.com>
 // SPDX-License-Identifier: MIT
 
-// Memory-operation loops, compiler ABI adapters, and SRAM diagnostics for Memory.swift.
+// Memory-operation loops, ordering barrier, compiler ABI adapters, and SRAM diagnostics.
 // RP2.S owns reset, stack protection, startup status, and the fault entry.
 // This file owns stack painting and its peak-usage diagnostic state.
 // No external runtime is linked. Scripts/build.sh produces asm-Memory.o.
@@ -18,6 +18,22 @@
 // Stack paint pattern is shared by the startup painter and peak-usage scan here.
 .equ MEMORY_STACK_PAINT_WORD,          0xA5A5A5A5
 .equ MEMORY_STACK_PAINT_WORD_BYTES,    4
+
+// -----------------------------------------------------------------------------
+// Function: rp2_memory_barrier() [No Stack Frames]
+// C ABI: no arguments or result; preserves all registers and flags.
+// Common full-system data memory barrier for RP2040 and RP2350 Arm targets.
+// Orders data accesses without changing IRQ state or providing mutual exclusion.
+.section .text.rp2_memory_barrier,"ax",%progbits
+.p2align 2
+.global rp2_memory_barrier
+.type rp2_memory_barrier,%function
+.thumb_func
+rp2_memory_barrier:
+    dmb sy
+    bx lr
+.size rp2_memory_barrier, .-rp2_memory_barrier
+// End function: rp2_memory_barrier.
 
 // -----------------------------------------------------------------------------
 // Function: rp2_stack_paint() [No Stack Frames]
@@ -104,10 +120,10 @@ rp2_sram_static_bytes:
 .type rp2_sram_stack_reserved_bytes,%function
 .thumb_func
 rp2_sram_stack_reserved_bytes:
-    // return STACK_TOP - STACK_BOTTOM
-    ldr r0, =STACK_TOP
-    ldr r1, =STACK_BOTTOM
-    subs r0, r0, r1
+    // return the stack reservations for both cores, excluding their guards
+    ldr r0, =STACK_RESERVED_BYTES
+    ldr r1, =CORE1_STACK_RESERVED_BYTES
+    adds r0, r0, r1
     bx lr
 .size rp2_sram_stack_reserved_bytes, .-rp2_sram_stack_reserved_bytes
 // End function: rp2_sram_stack_reserved_bytes.
@@ -123,9 +139,9 @@ rp2_sram_stack_reserved_bytes:
 .type rp2_sram_reserved_bytes,%function
 .thumb_func
 rp2_sram_reserved_bytes:
-    // return STACK_TOP - STACK_GUARD_BOTTOM
+    // return both stack reservations including both guards
     ldr r0, =STACK_TOP
-    ldr r1, =STACK_GUARD_BOTTOM
+    ldr r1, =CORE1_STACK_GUARD_BOTTOM
     subs r0, r0, r1
     bx lr
 .size rp2_sram_reserved_bytes, .-rp2_sram_reserved_bytes

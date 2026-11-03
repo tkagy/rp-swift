@@ -11,7 +11,30 @@
 enum RP2040 {
     static let name: StaticString = "RP2040"
 
-    // Assembly MPU definitions live in the RP2040 block of Sources/Memory.S.
+    // Assembly MPU definitions live in the RP2040 block of Sources/RP2.S.
+
+    /// SIO differences; common register definitions live in SIO.swift.
+    enum SIO {
+        static let outputSetOffset: UInt32 = 0x14
+        static let outputClearOffset: UInt32 = 0x18
+        static let outputXorOffset: UInt32 = 0x1C
+        static let outputEnableOffset: UInt32 = 0x20
+        static let outputEnableSetOffset: UInt32 = 0x24
+        static let outputEnableClearOffset: UInt32 = 0x28
+        static let outputEnableXorOffset: UInt32 = 0x2C
+        static let highOutputOffset: UInt32 = 0x30
+        static let highOutputSetOffset: UInt32 = 0x34
+        static let highOutputClearOffset: UInt32 = 0x38
+        static let highOutputXorOffset: UInt32 = 0x3C
+        static let highOutputEnableOffset: UInt32 = 0x40
+        static let highOutputEnableSetOffset: UInt32 = 0x44
+        static let highOutputEnableClearOffset: UInt32 = 0x48
+        static let gpioMask: UInt32 = 0x3FFF_FFFF
+        static let highGPIOMask: UInt32 = 0
+        static let qspiShift: UInt32 = 0
+        static let fifoDepth: UInt32 = 8
+        static let usableSpinlocks: UInt32 = UInt32.max
+    }
 
     enum XOSC {
         static let base: UInt32 = 0x4002_4000

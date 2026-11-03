@@ -1,9 +1,9 @@
 // Copyright (c) 2026 tkagy <248091500+tkagy@users.noreply.github.com>
 // SPDX-License-Identifier: MIT
 
-// Assembly startup and terminal fault entry for RP2.swift.
+// Assembly core startup, launch-address accessors, and terminal fault entry for RP2.swift.
 // Reset initializes RAM through Memory.S primitives, validates/protects the boot
-// stack, calls Memory.S to paint unused words, and enters rp2_start. No external runtime is linked.
+// stack, calls Memory.S to paint unused words, and enters rp2_core0_start. No external runtime is linked.
 // Build: Scripts/build.sh produces asm-RP2.o, separate from Swift's RP2.o.
 // Reset and its assembly helpers create no active stack frames. The reset entry
 // is not a returning C function; helpers document their private register ABI.
@@ -66,22 +66,23 @@
 .equ MEMORY_STACK_ALIGNMENT,           8
 .equ MEMORY_STACK_ALIGNMENT_MASK,      (MEMORY_STACK_ALIGNMENT - 1)
 .equ MEMORY_STACK_MPU_REGION,          0
+.equ RP2_THUMB_BIT,                    1
 
 // =============================================================================
 // STARTUP ONLY -- reset entry and private helpers; not Swift/C APIs
 // =============================================================================
 
 // -----------------------------------------------------------------------------
-// Function: rp2_reset()  [No Stack Frames]
+// Function: rp2_core0_entry()  [No Stack Frames]
 // --> Init globals
 // --> Protect/Paint the stack
-// --> Jump to rp2_start()
-.section .text.rp2_reset,"ax",%progbits
+// --> Jump to rp2_core0_start()
+.section .text.rp2_core0_entry,"ax",%progbits
 .p2align 2
-.global rp2_reset
-.type rp2_reset,%function
+.global rp2_core0_entry
+.type rp2_core0_entry,%function
 .thumb_func
-rp2_reset:
+rp2_core0_entry:
  // let savedMask = readPRIMASK(); disableInterrupts()
     mrs r8, primask
     cpsid i
@@ -114,7 +115,7 @@ rp2_reset:
  // publishMemoryWrites(); writePRIMASK(savedMask); startSwift()
     dsb
     msr primask, r8
-    bl rp2_start                // BL uses LR; Swift may create protected stack frames.
+    bl rp2_core0_start                // BL uses LR; Swift may create protected stack frames.
     movs r0, #MEMORY_STACK_STATUS_SETUP // A returning Swift entry is also a setup failure.
 .Lreset_failure:
  // startupStatus = status; fault(reason: status)
@@ -122,8 +123,8 @@ rp2_reset:
     str r0, [r1]
     mov r2, r0                  // Preserve the error for debugger inspection.
     b rp2_fault
-.size rp2_reset, .-rp2_reset
-// End function: rp2_reset.
+.size rp2_core0_entry, .-rp2_core0_entry
+// End function: rp2_core0_entry.
 .ltorg
 
 // -----------------------------------------------------------------------------
@@ -151,8 +152,10 @@ rp2_stack_initialize:
 
  // return protectStack() // B preserves LR; no return-address save is needed.
 #if RP2040
+    ldr r5, =STACK_GUARD_BOTTOM
     b rp2040_stack_protect
 #elif RP2350
+    mov r1, r4
     b rp2350_stack_protect
 #endif
 .Lstack_init_invalid_msp:
@@ -167,7 +170,8 @@ rp2_stack_initialize:
 // Function: rp2040_stack_protect() [No Stack Frames]
 // --> Check that the MPU and all its regions are disabled
 // --> Tail-branch to guard setup; return its status directly to reset
-// Private ABI: r0=status, clobbers r0-r7/flags; preserves r8-r11/SP/LR.
+// Private ABI: r5=guard bottom; r0=status; clobbers r0-r3/r7/flags.
+// Preserves r4-r6/r8-r11/SP/LR so the guard base survives the MPU checks.
 .section .text.rp2040_stack_protect,"ax",%progbits
 .p2align 2
 .type rp2040_stack_protect,%function
@@ -217,19 +221,19 @@ rp2040_stack_protect:
 
 // -----------------------------------------------------------------------------
 // Function: rp2040_stack_guard_enable() [No Stack Frames]
-// --> Enable the linker-defined guard in MPU region 0
+// --> Enable the selected core's guard in MPU region 0
 // --> Tail-branch to readback verification
-// Called only after the MPU/region checks. Linker constants supply base and SIZE.
+// Called only after the MPU/region checks. r5 selects the guard base; both cores
+// use the same linker-defined guard SIZE, each in its own core-local MPU.
 // Private ABI: r0=status, clobbers r0-r7/flags; preserves r8-r11/SP/LR.
 .section .text.rp2040_stack_guard_enable,"ax",%progbits
 .p2align 2
 .type rp2040_stack_guard_enable,%function
 .thumb_func
 rp2040_stack_guard_enable:
- // let mpu = MPU(base: RP2040_MPU_BASE); let guardBottom = STACK_GUARD_BOTTOM
+ // let mpu = MPU(base: RP2040_MPU_BASE); let guardBottom = r5
  // let attributes = executeNever | enabled | (STACK_GUARD_MPU_SIZE << sizeShift)
     ldr r3, =RP2040_MPU_BASE
-    ldr r5, =STACK_GUARD_BOTTOM
     ldr r7, =STACK_GUARD_MPU_SIZE
     lsls r7, r7, #RP2040_MPU_RASR_SIZE_SHIFT
     ldr r0, =(RP2040_MPU_RASR_EXECUTE_NEVER | RP2040_MPU_RASR_ENABLE)
@@ -290,15 +294,15 @@ rp2040_stack_guard_verify:
 // -----------------------------------------------------------------------------
 // Function: rp2350_stack_protect() [No Stack Frames]
 // --> Set Secure MSPLIM and verify readback
-// Private ABI: r0=status, clobbers r0-r1/flags; preserves r2-r11/SP/LR.
+// Private ABI: r1=stack bottom; r0=status; clobbers r0/flags.
+// Preserves r1-r11/SP/LR.
 .section .text.rp2350_stack_protect,"ax",%progbits
 .p2align 2
 .type rp2350_stack_protect,%function
 .thumb_func
 rp2350_stack_protect:
- // writeMSPLIM(STACK_BOTTOM)
- // guard readMSPLIM() == STACK_BOTTOM else { return .setupFailed }
-    ldr r1, =STACK_BOTTOM
+ // writeMSPLIM(stackBottom)
+ // guard readMSPLIM() == stackBottom else { return .setupFailed }
     msr msplim, r1
     isb
     mrs r0, msplim
@@ -317,6 +321,117 @@ rp2350_stack_protect:
 #endif
 
 .ltorg
+
+// =============================================================================
+// CORE 1 -- the ROM supplies VTOR, MSP, and this Thumb entry from the FIFO launch
+// RP2040 datasheet 2.8.2; RP2350 datasheet 5.3. Shared RAM is initialized by core 0.
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Function: rp2_core1_entry() [No Stack Frames]
+// Validate the independent MSP and protect it before any Swift prologue runs.
+// Ordinary IRQs remain masked until core 1 code explicitly enables them.
+// This entry never repeats RAM initialization or core 0's stack diagnostics.
+.section .text.rp2_core1_entry,"ax",%progbits
+.p2align 2
+.global rp2_core1_entry
+.type rp2_core1_entry,%function
+.thumb_func
+rp2_core1_entry:
+    cpsid i
+    ldr r4, =CORE1_STACK_BOTTOM
+    mrs r0, msp
+    cmp r0, r4
+    blo .Lcore1_invalid_stack
+    ldr r1, =CORE1_STACK_TOP
+    cmp r0, r1
+    bhi .Lcore1_invalid_stack
+    movs r1, #MEMORY_STACK_ALIGNMENT_MASK
+    tst r0, r1
+    bne .Lcore1_invalid_stack
+#if RP2040
+    ldr r5, =CORE1_STACK_GUARD_BOTTOM
+    bl rp2040_stack_protect
+#elif RP2350
+    mov r1, r4
+    bl rp2350_stack_protect
+#endif
+    cmp r0, #MEMORY_STACK_STATUS_NONE
+    bne .Lcore1_start_failed
+    dsb
+    isb
+    bl rp2_core1_start
+    movs r0, #MEMORY_STACK_STATUS_SETUP
+    b .Lcore1_start_failed
+.Lcore1_invalid_stack:
+    movs r0, #MEMORY_STACK_STATUS_LAYOUT
+.Lcore1_start_failed:
+    mov r2, r0
+    b rp2_fault
+.size rp2_core1_entry, .-rp2_core1_entry
+// End function: rp2_core1_entry.
+.ltorg
+
+// -----------------------------------------------------------------------------
+// Function: rp2_core1_vector_table() -> UInt32 [No Stack Frames]
+// C ABI: returns the shared flash vector-table address in r0.
+.section .text.rp2_core1_vector_table,"ax",%progbits
+.p2align 2
+.global rp2_core1_vector_table
+.type rp2_core1_vector_table,%function
+.thumb_func
+rp2_core1_vector_table:
+    ldr r0, =__vector_table
+    bx lr
+.size rp2_core1_vector_table, .-rp2_core1_vector_table
+// End function: rp2_core1_vector_table.
+.ltorg
+
+// -----------------------------------------------------------------------------
+// Function: rp2_core1_stack_top() -> UInt32 [No Stack Frames]
+// C ABI: returns the linker-reserved, eight-byte-aligned core 1 stack top in r0.
+.section .text.rp2_core1_stack_top,"ax",%progbits
+.p2align 2
+.global rp2_core1_stack_top
+.type rp2_core1_stack_top,%function
+.thumb_func
+rp2_core1_stack_top:
+    ldr r0, =CORE1_STACK_TOP
+    bx lr
+.size rp2_core1_stack_top, .-rp2_core1_stack_top
+// End function: rp2_core1_stack_top.
+.ltorg
+
+// -----------------------------------------------------------------------------
+// Function: rp2_core1_entry_address() -> UInt32 [No Stack Frames]
+// C ABI: returns the core 1 entry address in r0, explicitly including the Thumb bit.
+.section .text.rp2_core1_entry_address,"ax",%progbits
+.p2align 2
+.global rp2_core1_entry_address
+.type rp2_core1_entry_address,%function
+.thumb_func
+rp2_core1_entry_address:
+    ldr r0, =rp2_core1_entry
+    movs r1, #RP2_THUMB_BIT
+    orrs r0, r1
+    bx lr
+.size rp2_core1_entry_address, .-rp2_core1_entry_address
+// End function: rp2_core1_entry_address.
+.ltorg
+
+// -----------------------------------------------------------------------------
+// Function: rp2_send_event() [No Stack Frames]
+// C ABI: no arguments or result; preserves registers and flags. Wake the ROM WFE.
+.section .text.rp2_send_event,"ax",%progbits
+.p2align 2
+.global rp2_send_event
+.type rp2_send_event,%function
+.thumb_func
+rp2_send_event:
+    sev
+    bx lr
+.size rp2_send_event, .-rp2_send_event
+// End function: rp2_send_event.
 
 // =============================================================================
 // FAULT ENTRY -- exception vectors and the Swift stopOnFault() binding

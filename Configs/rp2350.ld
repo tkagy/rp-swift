@@ -22,7 +22,7 @@
    KEEP: retain with --gc-sections. NOLOAD: omit initial bytes from the file.
    ALIGN(4): align to four bytes. ASSERT: fail the link if a condition is false.
    K / M: 1024 / 1024*1024 bytes. */
-ENTRY(rp2_reset)
+ENTRY(rp2_core0_entry)
 
 /* Memory.S provides the C primitives and Arm fill/clear adapters.
    Copy/move helpers share the C argument order; return values are ignored.
@@ -66,19 +66,27 @@ MEMORY {
 }
 STACK_TOP = ORIGIN(RAM) + LENGTH(RAM); /* 0x20082000: just past SRAM, aligned to 8 bytes */
 
-/* The top 8 KiB is stack space. rp2_reset sets MSPLIM to STACK_BOTTOM before Swift.
+/* The top 8 KiB is stack space. rp2_core0_entry sets MSPLIM to STACK_BOTTOM before Swift.
    The CPU checks stack-pointer updates; no separate MPU guard is required. */
 STACK_RESERVED_BYTES = 8K;
 STACK_BOTTOM = STACK_TOP - STACK_RESERVED_BYTES;
 STACK_GUARD_BYTES = 0;
 STACK_GUARD_BOTTOM = STACK_BOTTOM;
 
+/* Core 1 uses its own 8 KiB stack and Secure MSPLIM, set before entering Swift. */
+CORE1_STACK_TOP = STACK_GUARD_BOTTOM;
+CORE1_STACK_RESERVED_BYTES = 8K;
+CORE1_STACK_BOTTOM = CORE1_STACK_TOP - CORE1_STACK_RESERVED_BYTES;
+CORE1_STACK_GUARD_BYTES = 0;
+CORE1_STACK_GUARD_BOTTOM = CORE1_STACK_BOTTOM;
+
 SECTIONS {
     /* Section 5.9.5.1: without a VECTOR_TABLE item, ROM uses the image start.
        16 Cortex-M33 core slots + 52 external IRQs = 68 words = 272 bytes. */
     .vectors ORIGIN(FLASH) : {
+        __vector_table = .;
         LONG(STACK_TOP) /* Slot 0: initial MSP; the stack grows down from the top of SRAM. */
-        LONG(rp2_reset) /* Slot 1: reset handler address, including the function symbol's Thumb bit. */
+        LONG(rp2_core0_entry) /* Slot 1: reset handler address, including the function symbol's Thumb bit. */
         /* Route unused exceptions and reserved slots to the default fault handler. */
         LONG(rp2_fault) /* Slot  2: NMI */
         LONG(rp2_fault) /* Slot  3: HardFault */
@@ -149,8 +157,8 @@ SECTIONS {
     .got : ALIGN(4) { *(.got .got.*) } > FLASH
 
     /* .data stores initial values for RAM variables, such as count = 123.
-       Store their initial bytes in flash; rp2_reset copies them to RAM.
-       .bss contains zero-initialized variables; rp2_reset fills this range with zero.
+       Store their initial bytes in flash; rp2_core0_entry copies them to RAM.
+       .bss contains zero-initialized variables; rp2_core0_entry fills this range with zero.
        Align each boundary to four bytes so startup can copy or clear one UInt32 at a time.
        The boundary symbols name addresses; they do not allocate additional RAM variables. */
     .data : ALIGN(4) {
@@ -172,8 +180,8 @@ SECTIONS {
     /DISCARD/ : { *(.comment) *(.note*) *(.swift_modhash) *(.swift1_autolink_entries) }
     /* Keep initialized globals below the reserved stack area.
        Startup must not clear or overwrite the stack it is already using. */
-    ASSERT(__bss_end <= STACK_BOTTOM,
-           "RAM globals overlap the reserved stack area")
+    ASSERT(__bss_end <= CORE1_STACK_BOTTOM,
+           "RAM globals overlap the core 1 stack area")
     /* Fixed layout checks belong here; reset checks only the actual boot MSP
        and protection hardware. Reject bad layouts before producing firmware. */
     ASSERT(STACK_BOTTOM < STACK_TOP, "Stack reservation must not be empty")
@@ -184,6 +192,11 @@ SECTIONS {
 
     ASSERT(STACK_GUARD_BOTTOM == STACK_BOTTOM,
            "RP2350 uses MSPLIM without a separate stack guard")
+    ASSERT(CORE1_STACK_BOTTOM < CORE1_STACK_TOP && CORE1_STACK_TOP <= STACK_GUARD_BOTTOM,
+           "Core stacks must be separate and nonempty")
+    ASSERT(CORE1_STACK_BOTTOM >= ORIGIN(RAM), "Core 1 stack must lie in SRAM")
+    ASSERT((CORE1_STACK_TOP & 7) == 0 && (CORE1_STACK_BOTTOM & 7) == 0,
+           "Core 1 stack bounds must be 8-byte aligned")
 
     /* Four bytes per word: detect missing core exception or external IRQ entries. */
     ASSERT(SIZEOF(.vectors) == (16 + 52) * 4, "Unexpected RP2350 vector table size")

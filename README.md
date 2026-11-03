@@ -60,28 +60,23 @@ painting. The build links both assembly objects with the Swift object.
 ## Startup
 
 ```text
-Boot ROM / boot2
-    |
-    v
-rp2_reset (RP2.S)
-    | Mask ordinary interrupts; preserve the previous mask
-    | Copy .data initial values from flash to SRAM
-    | Clear .bss, including startup diagnostics
-    | Call rp2_stack_initialize: validate MSP and enable hardware protection
-    |   RP2040: configure the MPU guard
-    |   RP2350: set MSPLIM
-    |   Failure: record the error and stop in rp2_fault
-    | Call Memory.S rp2_stack_paint: paint unused stack words below MSP
-    | Restore the previous interrupt mask
-    v
-rp2_start (RP2.swift: first Swift function)
-    |
-    v
-RP2.initialize(): clock -> timer -> console -> UART
-    |
-    v
-RP2.main()
+Core 0:
+Boot ROM / boot2 → rp2_core0_entry (assembly)
+→ Initialize shared RAM → Protect and paint core 0 stack
+→ rp2_core0_start (Swift) → RP2.Core0.initialize()
+→ Initialize SIO, clock, timer, console and UART
+→ RP2.Core1.launch() → Wait for core 1 ready notification
+→ RP2.Core0.main() → Console polling loop
+
+Core 1:
+Boot ROM wait → FIFO launch from core 0 → rp2_core1_entry (assembly)
+→ Protect core 1 stack → rp2_core1_start (Swift)
+→ RP2.Core1.initialize() → Notify core 0 that Swift startup is complete
+→ RP2.Core1.main() → Infinite loop
 ```
+
+Each core installs its own stack protection before entering Swift: an MPU guard
+on RP2040, or MSPLIM on RP2350. Shared RAM is initialized only by core 0.
 
 ## Build-time SRAM Report
 
@@ -94,26 +89,28 @@ link or print this report.
 | --- | --- |
 | Total | Linker `SRAM_BYTES`: RP2040 264 KiB; RP2350 520 KiB |
 | Static | `__bss_end - SRAM_BASE`, including `.data`, `.bss`, and alignment |
-| Stack/guard | Entire stack reservation plus any MPU guard |
+| Stack/guard | Both cores' stack reservations plus any MPU guards |
 | Allocated | Static plus Stack/guard |
 | Remaining | Total minus Allocated; room for static storage to grow |
 
-Allocated includes unused reserved stack bytes. Remaining excludes the entire
-stack/guard reservation and is not allocator-managed memory; there is no heap.
+Allocated includes unused reserved stack bytes. Remaining excludes both cores'
+stack/guard reservations and is not allocator-managed memory; there is no heap.
 This report does not measure current or peak stack usage.
 
 ## SRAM Allocation Policy
 
-Code and read-only constants remain in flash. SRAM holds global data below the
-stack; the space between them is unused and has no heap allocator.
+Code and read-only constants remain in flash. SRAM holds global data below both
+cores' stacks and guards; the space between them is unused and has no heap allocator.
 
 | Region | Use | Size policy |
 | --- | --- | --- |
 | `.data` | Global data with initial values stored in flash | Determined by the compiler and linker |
 | `.bss` | Global data cleared to zero at startup | Determined by the compiler and linker |
 | Unallocated space | Room for global data to grow | Remaining SRAM below the stack and any guard region |
-| Stack | Local values, saved registers, and temporary storage | Reserve 8 KiB on both chips |
-| MPU guard (RP2040 only) | Deny accesses immediately below the stack | Reserve another 4 KiB |
+| Stack | Local values, saved registers, and temporary storage | Reserve 8 KiB per core on both chips |
+| MPU guard (RP2040 only) | Deny accesses immediately below each core's stack | Reserve 4 KiB per core |
+
+The total stack/guard reservation is 24 KiB on RP2040 and 16 KiB on RP2350.
 
 Global fixed-size buffers count toward `.data` or `.bss`; the linker places them
 below the reserved stack regions shown in the diagrams.
@@ -122,17 +119,24 @@ below the reserved stack regions shown in the diagrams.
 RP2040: 264 KiB total (270,336 bytes)
 
 0x20042000 +----------------------------------+ STACK_TOP / SRAM end
-           | Stack reservation                |
+           | Core 0 stack                     |
            | 8,192 bytes (8 KiB)               |
            | Grows downward: v                |
 0x20040000 +----------------------------------+ STACK_BOTTOM
-           | MPU guard: no access             |
+           | Core 0 MPU guard: no access      |
            | 4,096 bytes (4 KiB)               |
-0x2003F000 +----------------------------------+ STACK_GUARD_BOTTOM
+0x2003F000 +----------------------------------+ STACK_GUARD_BOTTOM / CORE1_STACK_TOP
+           | Core 1 stack                     |
+           | 8,192 bytes (8 KiB)               |
+           | Grows downward: v                |
+0x2003D000 +----------------------------------+ CORE1_STACK_BOTTOM
+           | Core 1 MPU guard: no access      |
+           | 4,096 bytes (4 KiB)               |
+0x2003C000 +----------------------------------+ CORE1_STACK_GUARD_BOTTOM
            | Unused SRAM                      |
            |                                  |
-           +----------------------------------+ __bss_end <= STACK_GUARD_BOTTOM
-           | .bss: zero-initialized globals   |
+           +----------------------------------+ __bss_end <= CORE1_STACK_GUARD_BOTTOM
+           | .bss: zero-initialized globals    |
            +----------------------------------+ __bss_start = __data_end
            | .data: initialized globals       |
 0x20000000 +----------------------------------+ __data_start / SRAM start
@@ -140,22 +144,27 @@ RP2040: 264 KiB total (270,336 bytes)
 RP2350: 520 KiB total (532,480 bytes)
 
 0x20082000 +----------------------------------+ STACK_TOP / SRAM end
-           | Stack reservation                |
+           | Core 0 stack                     |
            | 8,192 bytes (8 KiB)               |
            | Grows downward: v                |
-0x20080000 +----------------------------------+ STACK_BOTTOM / MSPLIM
+0x20080000 +----------------------------------+ STACK_BOTTOM / core 0 MSPLIM / CORE1_STACK_TOP
+           | Core 1 stack                     |
+           | 8,192 bytes (8 KiB)               |
+           | Grows downward: v                |
+0x2007E000 +----------------------------------+ CORE1_STACK_BOTTOM / core 1 MSPLIM
            | Unused SRAM                      |
            |                                  |
-           +----------------------------------+ __bss_end <= STACK_BOTTOM
-           | .bss: zero-initialized globals   |
+           +----------------------------------+ __bss_end <= CORE1_STACK_BOTTOM
+           | .bss: zero-initialized globals    |
            +----------------------------------+ __bss_start = __data_end
            | .data: initialized globals       |
 0x20000000 +----------------------------------+ __data_start / SRAM start
 ```
 
-The linker enforces the `.bss` limits shown in the diagram. RP2040 protects a 4 KiB
-region below its 8 KiB stack with the MPU. RP2350 uses `MSPLIM` at the bottom of
-its 8 KiB stack. Startup faults stop in `rp2_fault` before normal Swift code runs.
+The linker enforces the `.bss` limits shown in the diagrams. Each core installs
+its own protection: a 4 KiB MPU guard below its 8 KiB stack on RP2040, or `MSPLIM`
+at its stack bottom on RP2350. Startup faults stop in `rp2_fault` before Swift runs
+on the affected core.
 
 ## Console
 
