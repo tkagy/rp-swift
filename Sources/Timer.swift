@@ -68,16 +68,13 @@ enum Timer {
     // Register offsets shared by RP2040 TIMER and RP2350 TIMER0.
     private enum COUNTER {
         enum TIMERAWH {
-            static let offset: UInt32 = 0x24
-            static let reg = RP2.Register32(address: Chip.Timer.base + offset)
+            static let reg = RP2.Register32(address: Chip.Timer.base + 0x24)
         }
         enum TIMERAWL {
-            static let offset: UInt32 = 0x28
-            static let reg = RP2.Register32(address: Chip.Timer.base + offset)
+            static let reg = RP2.Register32(address: Chip.Timer.base + 0x28)
         }
         enum DBGPAUSE {
-            static let offset: UInt32 = 0x2C
-            static let reg = RP2.Register32(address: Chip.Timer.base + offset)
+            static let reg = RP2.Register32(address: Chip.Timer.base + 0x2C)
             static let core0: UInt32 = 1 << 1
             static let core1: UInt32 = 1 << 2
         }
