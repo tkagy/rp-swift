@@ -44,10 +44,10 @@ enum Timer {
 
     private enum RESETS {
         enum RESET {
-            @RP2.Register32(address: Chip.Reset.base) static var value: UInt32
+            static let reg = RP2.Register32(address: Chip.Reset.base)
         }
         enum RESET_DONE {
-            @RP2.Register32(address: Chip.Reset.base + Chip.Reset.doneOffset) static var value: UInt32
+            static let reg = RP2.Register32(address: Chip.Reset.base + Chip.Reset.doneOffset)
         }
     }
 
@@ -56,30 +56,34 @@ enum Timer {
         static let maxCycles: UInt32 = 0x1FF
 
         enum CTRL {
-            @RP2.Register32(address: Chip.Timer.tickControl) static var value: UInt32
+            static let reg = RP2.Register32(address: Chip.Timer.tickControl)
         }
         #if RP2350
         enum CYCLES {
-            @RP2.Register32(address: Chip.Timer.tickCycles) static var value: UInt32
+            static let reg = RP2.Register32(address: Chip.Timer.tickCycles)
         }
         #endif
     }
 
+    // Register offsets shared by RP2040 TIMER and RP2350 TIMER0.
     private enum COUNTER {
         enum TIMERAWH {
-            @RP2.Register32(address: Chip.Timer.base + Chip.Timer.rawHighOffset) static var value: UInt32
+            static let offset: UInt32 = 0x24
+            static let reg = RP2.Register32(address: Chip.Timer.base + offset)
         }
         enum TIMERAWL {
-            @RP2.Register32(address: Chip.Timer.base + Chip.Timer.rawLowOffset) static var value: UInt32
+            static let offset: UInt32 = 0x28
+            static let reg = RP2.Register32(address: Chip.Timer.base + offset)
         }
         enum DBGPAUSE {
-            @RP2.Register32(address: Chip.Timer.base + Chip.Timer.debugPauseOffset) static var value: UInt32
+            static let offset: UInt32 = 0x2C
+            static let reg = RP2.Register32(address: Chip.Timer.base + offset)
             static let core0: UInt32 = 1 << 1
             static let core1: UInt32 = 1 << 2
         }
         #if RP2350
         enum SOURCE {
-            @RP2.Register32(address: Chip.Timer.base + Chip.Timer.sourceOffset) static var value: UInt32
+            static let reg = RP2.Register32(address: Chip.Timer.base + Chip.Timer.sourceOffset)
             static let referenceTicks: UInt32 = 0
         }
         #endif
@@ -102,14 +106,14 @@ enum Timer {
         }
 
         // Reset only this timer, then establish its reference before releasing it.
-        RESETS.RESET.$value.setBits(Chip.Reset.timer)
+        RESETS.RESET.reg.setBits(Chip.Reset.timer)
         configureTick(cycles: cycles)
-        RESETS.RESET.$value.clearBits(Chip.Reset.timer)
+        RESETS.RESET.reg.clearBits(Chip.Reset.timer)
         guard waitForResetRelease() else { fail(.resetDidNotComplete) }
         #if RP2350
-        COUNTER.SOURCE.value = COUNTER.SOURCE.referenceTicks
+        COUNTER.SOURCE.reg.value = COUNTER.SOURCE.referenceTicks
         #endif
-        COUNTER.DBGPAUSE.value = pauseOnDebug
+        COUNTER.DBGPAUSE.reg.value = pauseOnDebug
             ? (COUNTER.DBGPAUSE.core0 | COUNTER.DBGPAUSE.core1)
             : 0
         isInitialized = true
@@ -120,9 +124,9 @@ enum Timer {
     static var microseconds: UInt64 {
         guard isInitialized else { fail(.notInitialized) }
         while true {
-            let high = COUNTER.TIMERAWH.value
-            let low = COUNTER.TIMERAWL.value
-            if high == COUNTER.TIMERAWH.value {
+            let high = COUNTER.TIMERAWH.reg.value
+            let low = COUNTER.TIMERAWL.reg.value
+            if high == COUNTER.TIMERAWH.reg.value {
                 return (UInt64(high) << UInt32.bitWidth) | UInt64(low)
             }
         }
@@ -183,26 +187,26 @@ enum Timer {
     // MARK: - Initialization helpers
 
     private static func configureTick(cycles: UInt32) {
-        TICK.CTRL.value = 0
+        TICK.CTRL.reg.value = 0
         guard waitForTick(running: false) else { fail(.tickDidNotStop) }
         #if RP2350
-        TICK.CYCLES.value = cycles
-        TICK.CTRL.value = Chip.Timer.tickEnable
+        TICK.CYCLES.reg.value = cycles
+        TICK.CTRL.reg.value = Chip.Timer.tickEnable
         #else
         // RP2040 shares this reference tick with the watchdog. Do not change its
         // period while the watchdog is active; this does not enable the watchdog.
-        TICK.CTRL.value = cycles | Chip.Timer.tickEnable
+        TICK.CTRL.reg.value = cycles | Chip.Timer.tickEnable
         #endif
         guard waitForTick(running: true) else { fail(.tickDidNotStart) }
     }
 
     private static func waitForTick(running: Bool) -> Bool {
-        waitForRegister(TICK.CTRL.$value, mask: Chip.Timer.tickRunning,
+        waitForRegister(TICK.CTRL.reg, mask: Chip.Timer.tickRunning,
                         expected: running ? Chip.Timer.tickRunning : 0)
     }
 
     private static func waitForResetRelease() -> Bool {
-        waitForRegister(RESETS.RESET_DONE.$value, mask: Chip.Reset.timer,
+        waitForRegister(RESETS.RESET_DONE.reg, mask: Chip.Reset.timer,
                         expected: Chip.Reset.timer)
     }
 
