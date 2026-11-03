@@ -40,6 +40,8 @@ enum Clock {
 
     // Each hardware register groups its handle with its bit definitions.
     private enum CLOCKS {
+        static let divideByOne: UInt32 = 1 << Chip.Clock.dividerIntegerShift
+
         // Selects the source of the reference clock (CLK_REF).
         enum CLK_REF_CTRL {
             static let reg = RP2.Register32(address: Chip.Clock.base + 0x30)
@@ -49,7 +51,6 @@ enum Clock {
 
         enum CLK_REF_DIV {
             static let reg = RP2.Register32(address: Chip.Clock.base + 0x34)
-            static let one: UInt32 = 1
         }
 
         enum CLK_REF_SELECTED {
@@ -65,7 +66,6 @@ enum Clock {
 
         enum CLK_SYS_DIV {
             static let reg = RP2.Register32(address: Chip.Clock.base + 0x40)
-            static let one: UInt32 = 1
         }
 
         enum CLK_SYS_SELECTED {
@@ -83,7 +83,6 @@ enum Clock {
         #if RP2350
         enum CLK_PERI_DIV {
             static let reg = RP2.Register32(address: Chip.Clock.base + 0x4C)
-            static let one: UInt32 = 1
         }
         #endif
 
@@ -171,7 +170,7 @@ enum Clock {
             mask: UInt32.max,
             value: CLOCKS.CLK_SYS_SELECTED.reference
         ) else { return .systemClockDidNotSwitchToReference }
-        CLOCKS.CLK_REF_DIV.reg.value = CLOCKS.CLK_REF_DIV.one << Chip.Clock.dividerIntegerShift
+        CLOCKS.CLK_REF_DIV.reg.value = CLOCKS.divideByOne
         CLOCKS.CLK_REF_CTRL.reg.value =
             (CLOCKS.CLK_REF_CTRL.reg.value & ~CLOCKS.CLK_REF_CTRL.sourceMask)
                 | CLOCKS.CLK_REF_CTRL.sourceXosc
@@ -180,7 +179,7 @@ enum Clock {
             mask: UInt32.max,
             value: CLOCKS.CLK_REF_SELECTED.xosc
         ) else { return .referenceClockDidNotSelectCrystal }
-        CLOCKS.CLK_SYS_DIV.reg.value = CLOCKS.CLK_SYS_DIV.one << Chip.Clock.dividerIntegerShift
+        CLOCKS.CLK_SYS_DIV.reg.value = CLOCKS.divideByOne
 
         // Stop the peripheral clock and allow propagation before switching its mux.
         // RP2040 2.15.3.2; RP2350 8.1.3.2 (same mux switching requirement).
@@ -192,7 +191,7 @@ enum Clock {
         if let error = initializeSystemPLL() { return error }
 
         #if RP2350
-        CLOCKS.CLK_PERI_DIV.reg.value = CLOCKS.CLK_PERI_DIV.one << Chip.Clock.dividerIntegerShift
+        CLOCKS.CLK_PERI_DIV.reg.value = CLOCKS.divideByOne
         #endif
         CLOCKS.CLK_PERI_CTRL.reg.value = CLOCKS.CLK_PERI_CTRL.sourceXosc // Still stopped.
         CLOCKS.CLK_PERI_CTRL.reg.value =
