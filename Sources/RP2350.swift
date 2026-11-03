@@ -63,7 +63,7 @@ enum RP2350 {
         // SYSINFO.PACKAGE_SEL: fixed-address package identification register.
         private enum SYSINFO {
             enum PACKAGE_SEL {
-                @RP2.Register32(address: RP2350.SystemInfo.base + 0x04) static var value: UInt32
+                static let reg = RP2.Register32(address: RP2350.SystemInfo.base + 0x04)
                 // Bit 0: 0 = QFN80 (B), 1 = QFN60 (A).
                 static let packageMask: UInt32 = 1 << 0
                 static let qfn80: UInt32 = 0
@@ -74,7 +74,7 @@ enum RP2350 {
             if pin < qfn60PinCount { return true }
             guard pin < pinCount else { return false }
             // GPIO30...47 are only bonded out on the B package.
-            return SYSINFO.PACKAGE_SEL.value & SYSINFO.PACKAGE_SEL.packageMask
+            return SYSINFO.PACKAGE_SEL.reg.value & SYSINFO.PACKAGE_SEL.packageMask
                 == SYSINFO.PACKAGE_SEL.qfn80
         }
     }
