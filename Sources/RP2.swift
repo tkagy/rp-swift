@@ -21,7 +21,6 @@ enum RP2 {
     // https://datasheets.raspberrypi.com/rp2350/rp2350-datasheet.pdf
     // The immutable handle can be shared; it refers to hardware, not Swift-owned memory.
     // Sendable does not serialize register operations or replace peripheral ownership.
-    @propertyWrapper
     struct Register32: @unchecked Sendable {
         // RP2040 2.1.2 / RP2350 2.1.3: atomic SET/CLEAR alias address offsets.
         // Writing a mask to base+0x2000 sets those bits in the original register;
@@ -33,16 +32,6 @@ enum RP2 {
 
         let address: UInt32
         private let pointer: UnsafeMutablePointer<UInt32>
-
-        // With @Register32 var foo: UInt32, foo reads/writes hardware via wrappedValue.
-        // Swift stores the wrapper itself in a synthesized private property named _foo.
-        var wrappedValue: UInt32 {
-            get { value }
-            nonmutating set { value = newValue }
-        }
-
-        // $foo exposes this handle for operations such as $foo.clearBits(mask).
-        var projectedValue: Register32 { self }
 
         // Access hardware on every read or write. Keep these accessors out of
         // optimized callers; ordinary Swift pointer accesses are not volatile.
