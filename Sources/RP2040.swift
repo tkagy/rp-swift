@@ -91,17 +91,25 @@ enum RP2040 {
         private static let thumbBit = UInt(1)
         private static let watchdogBase: UInt32 = 0x4005_8000
         private static let psmBase: UInt32 = 0x4001_0000
-        private static let watchdogTrigger: UInt32 = 1 << 31
-        private static let watchdogResetDomains: UInt32 = (1 << 17) - 1
-        private static let oscillatorDomains: UInt32 = (1 << 0) | (1 << 1)
 
         private enum WATCHDOG {
-            @RP2.Register32(address: watchdogBase) static var control: UInt32
-            // SCRATCH4 = SCRATCH0 (0x0c) + four words. Zero selects normal boot.
-            @RP2.Register32(address: watchdogBase + 0x1C) static var scratch4: UInt32
+            enum CTRL {
+                static let reg = RP2.Register32(address: watchdogBase)
+                static let trigger: UInt32 = 1 << 31
+            }
+
+            enum SCRATCH4 {
+                // SCRATCH4 = SCRATCH0 (0x0c) + four words. Zero selects normal boot.
+                static let reg = RP2.Register32(address: watchdogBase + 0x1C)
+            }
         }
+
         private enum PSM {
-            @RP2.Register32(address: psmBase + 0x08) static var watchdogSelect: UInt32
+            enum WDSEL {
+                static let reg = RP2.Register32(address: psmBase + 0x08)
+                static let resetDomains: UInt32 = (1 << 17) - 1
+                static let oscillatorDomains: UInt32 = (1 << 0) | (1 << 1)
+            }
         }
 
         /// Read a 16-bit pointer stored at a fixed, aligned boot ROM address.
@@ -125,11 +133,11 @@ enum RP2040 {
 
         /// Restart through the normal flash boot path. Success does not return.
         static func reset() -> Bool {
-            WATCHDOG.control = 0
-            WATCHDOG.scratch4 = 0
+            WATCHDOG.CTRL.reg.value = 0
+            WATCHDOG.SCRATCH4.reg.value = 0
             // Reset both cores and peripherals, keeping ROSC/XOSC running.
-            PSM.watchdogSelect = watchdogResetDomains & ~oscillatorDomains
-            WATCHDOG.control = watchdogTrigger
+            PSM.WDSEL.reg.value = PSM.WDSEL.resetDomains & ~PSM.WDSEL.oscillatorDomains
+            WATCHDOG.CTRL.reg.value = WATCHDOG.CTRL.trigger
             while true {}
         }
     }
