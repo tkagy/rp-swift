@@ -81,7 +81,7 @@ struct UART: ConsoleTransport {
     private(set) var receivePin: UInt32? = nil
     // Requested baud rate; the hardware divider may introduce rounding error.
     private(set) var baudRate: UInt32? = nil
-    private var registers: Registers
+    private let regs: Registers
 
     private var resetMask: UInt32 {
         port == .uart0 ? Chip.Reset.uart0 : Chip.Reset.uart1
@@ -94,11 +94,11 @@ struct UART: ConsoleTransport {
     // RESET offset 0x00 and RESET_DONE offset 0x08 are common to both chips.
     private enum RESETS {
         enum RESET {
-            @RP2.Register32(address: Chip.Reset.base) static var value: UInt32
+            static let reg = RP2.Register32(address: Chip.Reset.base)
         }
 
         enum RESET_DONE {
-            @RP2.Register32(address: Chip.Reset.base + 0x08) static var value: UInt32
+            static let reg = RP2.Register32(address: Chip.Reset.base + 0x08)
         }
     }
 
@@ -139,77 +139,55 @@ struct UART: ConsoleTransport {
     // RP2040  4.2.8: UART offsets/fields are shared.
     // RP2350 12.1.8: UART offsets/fields are shared.
     // The selected port supplies the chip-specific UART base address.
-    // Unlike Clock's enums with fixed-address static values, these register types
-    // are structs so each UART instance can store handles for its selected port.
-    // Each struct groups its instance value with the register's shared bit definitions.
+    private enum UARTFR {
+        static let busy: UInt32 = 1 << 3
+        static let receiveEmpty: UInt32 = 1 << 4
+        static let transmitFull: UInt32 = 1 << 5
+    }
+
+    private enum UARTLCR_H {
+        static let fifoEnabled: UInt32 = 1 << 4
+        static let eightDataBits: UInt32 = 3 << 5
+    }
+
+    private enum UARTCR {
+        static let enabled: UInt32 = 1 << 0
+        static let transmitEnabled: UInt32 = 1 << 8
+        static let receiveEnabled: UInt32 = 1 << 9
+    }
+
+    private enum UARTICR {
+        static let allInterrupts: UInt32 = (1 << 11) - 1
+    }
+
+    // Each UART instance retains handles for its selected port.
     private struct Registers {
-        struct UARTDR {
-            @RP2.Register32 var value: UInt32
-        }
-
-        struct UARTFR {
-            @RP2.Register32 var value: UInt32
-            static let busy: UInt32 = 1 << 3
-            static let receiveEmpty: UInt32 = 1 << 4
-            static let transmitFull: UInt32 = 1 << 5
-        }
-
-        struct UARTIBRD {
-            @RP2.Register32 var value: UInt32
-        }
-
-        struct UARTFBRD {
-            @RP2.Register32 var value: UInt32
-        }
-
-        struct UARTLCR_H {
-            @RP2.Register32 var value: UInt32
-            static let fifoEnabled: UInt32 = 1 << 4
-            static let eightDataBits: UInt32 = 3 << 5
-        }
-
-        struct UARTCR {
-            @RP2.Register32 var value: UInt32
-            static let enabled: UInt32 = 1 << 0
-            static let transmitEnabled: UInt32 = 1 << 8
-            static let receiveEnabled: UInt32 = 1 << 9
-        }
-
-        struct UARTIMSC {
-            @RP2.Register32 var value: UInt32
-        }
-
-        struct UARTICR {
-            @RP2.Register32 var value: UInt32
-            static let allInterrupts: UInt32 = (1 << 11) - 1
-        }
-
-        var UARTDR: UARTDR
-        var UARTFR: UARTFR
-        var UARTIBRD: UARTIBRD
-        var UARTFBRD: UARTFBRD
-        var UARTLCR_H: UARTLCR_H
-        var UARTCR: UARTCR
-        var UARTIMSC: UARTIMSC
-        var UARTICR: UARTICR
+        let UARTDR: RP2.Register32
+        let UARTFR: RP2.Register32
+        let UARTIBRD: RP2.Register32
+        let UARTFBRD: RP2.Register32
+        let UARTLCR_H: RP2.Register32
+        let UARTCR: RP2.Register32
+        let UARTIMSC: RP2.Register32
+        let UARTICR: RP2.Register32
 
         init(base: UInt32) {
-            // Each port owns its register handles; constructing them does not access MMIO.
-            self.UARTDR = .init(value: .init(address: base + 0x00))
-            self.UARTFR = .init(value: .init(address: base + 0x18))
-            self.UARTIBRD = .init(value: .init(address: base + 0x24))
-            self.UARTFBRD = .init(value: .init(address: base + 0x28))
-            self.UARTLCR_H = .init(value: .init(address: base + 0x2C))
-            self.UARTCR = .init(value: .init(address: base + 0x30))
-            self.UARTIMSC = .init(value: .init(address: base + 0x38))
-            self.UARTICR = .init(value: .init(address: base + 0x44))
+            // Constructing handles does not access MMIO.
+            self.UARTDR = .init(address: base + 0x00)
+            self.UARTFR = .init(address: base + 0x18)
+            self.UARTIBRD = .init(address: base + 0x24)
+            self.UARTFBRD = .init(address: base + 0x28)
+            self.UARTLCR_H = .init(address: base + 0x2C)
+            self.UARTCR = .init(address: base + 0x30)
+            self.UARTIMSC = .init(address: base + 0x38)
+            self.UARTICR = .init(address: base + 0x44)
         }
     }
 
     // Construct register handles only; this does not configure hardware or GPIOs.
     init(_ port: Port) {
         self.port = port
-        registers = Registers(base: port == .uart0 ? Chip.UART0.base : Chip.UART1.base)
+        regs = Registers(base: port == .uart0 ? Chip.UART0.base : Chip.UART1.base)
     }
 
     /// Return a UART initialized with the selected TX/RX pins and baud rate. Store the
@@ -236,8 +214,8 @@ struct UART: ConsoleTransport {
     /// contain data; [11:8] preserve overrun/break/parity/framing error flags.
     // RP2040 4.2.8 / RP2350 12.1.8: UARTFR.RXFE and UARTDR have the same layout.
     func read() -> UInt32? {
-        if registers.UARTFR.value & Registers.UARTFR.receiveEmpty != 0 { return nil }
-        return registers.UARTDR.value
+        if regs.UARTFR.value & UARTFR.receiveEmpty != 0 { return nil }
+        return regs.UARTDR.value
     }
 
     /// Read a console byte, discarding bytes carrying UART receive errors.
@@ -256,15 +234,15 @@ struct UART: ConsoleTransport {
 
     /// True while the FIFO or shift register is still transmitting.
     var isTransmitting: Bool {
-        registers.UARTFR.value & Registers.UARTFR.busy != 0
+        regs.UARTFR.value & UARTFR.busy != 0
     }
 
     /// Enqueue one byte if FIFO space is available, without waiting.
     /// False leaves both the FIFO and the supplied byte untouched.
     @discardableResult
     func tryWrite(byte: UInt8) -> Bool {
-        guard registers.UARTFR.value & Registers.UARTFR.transmitFull == 0 else { return false }
-        registers.UARTDR.value = UInt32(byte)
+        guard regs.UARTFR.value & UARTFR.transmitFull == 0 else { return false }
+        regs.UARTDR.value = UInt32(byte)
         return true
     }
 
@@ -311,11 +289,11 @@ struct UART: ConsoleTransport {
         // Reset only the selected UART. IO/pad banks are shared with other GPIO users;
         // release their reset if needed without resetting their existing settings.
         let peripherals = resetMask | Chip.Reset.ioBank0 | Chip.Reset.padsBank0
-        RESETS.RESET.$value.setBits(resetMask)
-        RESETS.RESET.$value.clearBits(peripherals)
+        RESETS.RESET.reg.setBits(resetMask)
+        RESETS.RESET.reg.clearBits(peripherals)
         var resetReleased = false
         for _ in 0..<Self.maxPollCount {
-            if RESETS.RESET_DONE.value & peripherals == peripherals {
+            if RESETS.RESET_DONE.reg.value & peripherals == peripherals {
                 resetReleased = true
                 break
             }
@@ -325,15 +303,15 @@ struct UART: ConsoleTransport {
             faultHandler()
         }
 
-        registers.UARTCR.value = 0
+        regs.UARTCR.value = 0
         // RP2040 4.2 UART / RP2350 12.1 UART: same baud-rate generator formula.
         // At 12 MHz and 115200 baud: IBRD=6, FBRD=33, actual baud approximately 115108.
-        registers.UARTIBRD.value = divisor / 64
-        registers.UARTFBRD.value = divisor % 64
+        regs.UARTIBRD.value = divisor / 64
+        regs.UARTFBRD.value = divisor % 64
         // WLEN=3: eight bits; FEN=1: FIFO. PEN=0, STP2=0: no parity, one stop bit.
-        registers.UARTLCR_H.value = Registers.UARTLCR_H.eightDataBits | Registers.UARTLCR_H.fifoEnabled
-        registers.UARTIMSC.value = 0
-        registers.UARTICR.value = Registers.UARTICR.allInterrupts
+        regs.UARTLCR_H.value = UARTLCR_H.eightDataBits | UARTLCR_H.fifoEnabled
+        regs.UARTIMSC.value = 0
+        regs.UARTICR.value = UARTICR.allInterrupts
 
         // Select the validated UART function independently for TX and RX.
         IO_BANK0.control(tx).value = transmitFuncsel
@@ -341,8 +319,8 @@ struct UART: ConsoleTransport {
         PADS_BANK0.gpio(tx).value = PADS_BANK0.transmit
         PADS_BANK0.gpio(rx).value = PADS_BANK0.receive
 
-        registers.UARTCR.value = Registers.UARTCR.enabled
-            | Registers.UARTCR.transmitEnabled | Registers.UARTCR.receiveEnabled
+        regs.UARTCR.value = UARTCR.enabled
+            | UARTCR.transmitEnabled | UARTCR.receiveEnabled
         transmitPin = tx
         receivePin = rx
         self.baudRate = baudRate
