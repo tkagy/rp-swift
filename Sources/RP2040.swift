@@ -168,6 +168,21 @@ enum RP2040 {
 
 #if RP2040
 // Cortex-M0+ runtime support. @_cdecl entry points must be global functions.
+// Return the low 64 bits of a product without requiring a multiplication helper.
+// Use shifts and wrapping addition so this implementation cannot call itself.
+@_cdecl("__aeabi_lmul")
+func aeabiMultiply(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
+    var multiplicand = lhs
+    var multiplier = rhs
+    var product: UInt64 = 0
+    while multiplier != 0 {
+        if multiplier & 1 != 0 { product &+= multiplicand }
+        multiplicand <<= 1
+        multiplier >>= 1
+    }
+    return product
+}
+
 // __aeabi_uidiv takes two unsigned 32-bit integers and returns their quotient.
 // A zero denominator is handled by __aeabi_idiv0 below.
 // REVISIT: use SIO later
