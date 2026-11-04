@@ -72,27 +72,21 @@ enum RP2 {
         }
     }
 
-    typealias memory = Memory
-    typealias clock = Clock
-    typealias timer = Timer
-    typealias sio = SIO
-    typealias console = Console
-
     enum Core0 {
         // Entered only after assembly startup initializes RAM and protects the stack.
         // The peripheral clock must be ready before either UART is initialized.
         static func initialize() {
-            sio.initialize()
-            clock.initialize()
-            timer.initialize()
-            console.initialize(name: Chip.name)
-            console.add(UART(.uart0).initialize(tx: 0, rx: 1, baudRate: 115_200))
+            SIO.initialize()
+            Clock.initialize()
+            Timer.initialize()
+            Console.initialize(name: Chip.name)
+            Console.add(UART(.uart0).initialize(tx: 0, rx: 1, baudRate: 115_200))
             Core1.launch()
         }
 
         // Main loop
         static func main() -> Never {
-            while true { console.poll() }
+            while true { Console.poll() }
         }
     }
 
@@ -119,15 +113,15 @@ enum RP2 {
         //    RP2040 datasheet section 2.8.2
         //    RP2350 section 5.3
         static func launch() {
-            precondition(sio.core == .core0, "Start core 1 from core 0")
+            precondition(SIO.core == .core0, "Start core 1 from core 0")
             precondition(!started, "Core 1 is already started")
-            precondition(timer.isInitialized, "Initialize the timer before starting core 1")
+            precondition(Timer.isInitialized, "Initialize the timer before starting core 1")
 
             let vectorTable = vectorTableAddress()
             let stackTop = stackTopAddress()
             let entry = entryAddress()
-            let deadline = timer.microseconds &+ startupTimeout
-            memory.barrier()
+            let deadline = Timer.microseconds &+ startupTimeout
+            Memory.barrier()
 
             while !(
                 exchangeBootWord(syncWord, until: deadline)
@@ -140,7 +134,7 @@ enum RP2 {
 
             precondition(readBootWord(until: deadline) == readyWord,
                          "Unexpected core 1 startup acknowledgement")
-            memory.barrier()
+            Memory.barrier()
             started = true
         }
 
@@ -149,15 +143,15 @@ enum RP2 {
         /// - Wait for the reply; return whether it matches the value sent.
         /// - Stop if the startup deadline expires.
         private static func exchangeBootWord(_ word: UInt32, until deadline: UInt64) -> Bool {
-            precondition(!timer.hasReached(deadline: deadline), "Core 1 startup timed out")
+            precondition(!Timer.hasReached(deadline: deadline), "Core 1 startup timed out")
             if word == syncWord {
                 // Before sending 0, the datasheets require discarding pending replies
                 // and issuing SEV: core 1 may be asleep waiting for FIFO space.
-                _ = sio.FIFO.drain(maxWords: sio.FIFO.depth)
+                _ = SIO.FIFO.drain(maxWords: SIO.FIFO.depth)
                 sendEvent()
             }
-            while !sio.FIFO.write(word) {
-                precondition(!timer.hasReached(deadline: deadline), "Core 1 FIFO write timed out")
+            while !SIO.FIFO.write(word) {
+                precondition(!Timer.hasReached(deadline: deadline), "Core 1 FIFO write timed out")
             }
             sendEvent()
             return readBootWord(until: deadline) == word
@@ -165,8 +159,8 @@ enum RP2 {
 
         /// Wait for one value from core 1, using the deadline shared by the entire launch.
         private static func readBootWord(until deadline: UInt64) -> UInt32 {
-            while !timer.hasReached(deadline: deadline) {
-                if let word = sio.FIFO.read() { return word }
+            while !Timer.hasReached(deadline: deadline) {
+                if let word = SIO.FIFO.read() { return word }
             }
             preconditionFailure("Core 1 FIFO read timed out")
         }
@@ -174,9 +168,9 @@ enum RP2 {
         /// Entered on core 1 after its own stack protection is installed.
         /// Shared startup runs only on core 0; ordinary core 1 IRQs remain masked.
         static func initialize() {
-            precondition(sio.core == .core1, "Initialize Core1 on core 1")
-            memory.barrier()
-            let notified = sio.FIFO.write(readyWord)
+            precondition(SIO.core == .core1, "Initialize Core1 on core 1")
+            Memory.barrier()
+            let notified = SIO.FIFO.write(readyWord)
             precondition(notified, "Core 1 startup acknowledgement failed")
             sendEvent()
         }
