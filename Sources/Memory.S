@@ -6,7 +6,8 @@
 // This file owns stack painting and its peak-usage diagnostic state.
 // No external runtime is linked. Scripts/build.sh produces asm-Memory.o.
 // C ABI: r0-r2 carry arguments, r0 returns the result, and bx lr returns to caller.
-// All primitives and diagnostic accessors are register-only, without stack frames.
+// Memory primitives and diagnostic accessors are register-only. RP2040 atomic
+// fallbacks save four registers while holding a runtime-reserved hardware lock.
 // Function/End function comments delimit functions; .L labels are branch targets.
 // Swift-like comments are pseudocode, not additional executable code.
 
@@ -18,6 +19,142 @@
 // Stack paint pattern is shared by the startup painter and peak-usage scan here.
 .equ MEMORY_STACK_PAINT_WORD,          0xA5A5A5A5
 .equ MEMORY_STACK_PAINT_WORD_BYTES,    4
+
+// Compiler atomic ABI for aligned 32-bit normal RAM, used by Embedded Swift's
+// once-only initialization. All requested orders are conservatively implemented
+// as sequentially consistent. These entries do not make Console reentrant.
+// No NMI/HardFault use: those handlers cannot be masked by PRIMASK. A Swift
+// initializer must also not be reentered from an IRQ while its once token is busy.
+// ABI: load(ptr, order); store(ptr, value, order);
+// compare_exchange(ptr, expectedPtr, desired, successOrder, failureOrder).
+// The compare_exchange runtime entry has no 'weak' argument; failure updates
+// *expectedPtr and returns false. It never fails spuriously.
+#if RP2040
+// Use the highest-index lock so application locks remain the contiguous range
+// 0...30. Index 31 has no hardware-special behavior. Keep in sync with
+// SIO.runtimeReservedSpinlocks; applications and SIO.initialize must not claim
+// or release this runtime-owned lock. RP2350 uses CPU exclusives instead.
+.equ MEMORY_ATOMIC_SIO_BASE,          0xD0000000
+.equ MEMORY_ATOMIC_SPINLOCK_OFFSET,   0x100
+.equ MEMORY_ATOMIC_SPINLOCK_INDEX,    31
+.equ MEMORY_ATOMIC_SPINLOCK_STRIDE,   4
+.equ MEMORY_ATOMIC_LOCK_ADDRESS, MEMORY_ATOMIC_SIO_BASE + MEMORY_ATOMIC_SPINLOCK_OFFSET + MEMORY_ATOMIC_SPINLOCK_INDEX * MEMORY_ATOMIC_SPINLOCK_STRIDE
+
+// Preserve caller-owned registers and IRQ state. IRQs stay masked only for the
+// short primitive, never while the Swift initializer executes. The hardware
+// lock provides cross-core exclusion; PRIMASK alone would not be sufficient.
+.macro memory_atomic_enter
+    push {r4, r5, r6, r7}
+    mov r4, r0
+    mov r5, r1
+    mov r6, r2
+    mrs r7, primask
+    cpsid i
+    ldr r3, =MEMORY_ATOMIC_LOCK_ADDRESS
+.Latomic_wait\@:
+    ldr r2, [r3]
+    cmp r2, #0
+    beq .Latomic_wait\@
+    dmb sy
+.endm
+
+.macro memory_atomic_leave
+    dmb sy
+    movs r2, #0
+    str r2, [r3]
+    dmb sy
+    msr primask, r7
+    pop {r4, r5, r6, r7}
+    bx lr
+.endm
+#endif
+
+// Function: __atomic_load_4. Returns the loaded word in r0.
+.section .text.__atomic_load_4,"ax",%progbits
+.p2align 2
+.global __atomic_load_4
+.type __atomic_load_4,%function
+.thumb_func
+__atomic_load_4:
+#if RP2040
+    memory_atomic_enter
+    ldr r0, [r4]
+    memory_atomic_leave
+#else
+    dmb sy
+    ldr r0, [r0]
+    dmb sy
+    bx lr
+#endif
+.size __atomic_load_4, .-__atomic_load_4
+// End function: __atomic_load_4.
+.ltorg
+
+// Function: __atomic_store_4. Stores r1 to the word addressed by r0.
+.section .text.__atomic_store_4,"ax",%progbits
+.p2align 2
+.global __atomic_store_4
+.type __atomic_store_4,%function
+.thumb_func
+__atomic_store_4:
+#if RP2040
+    memory_atomic_enter
+    str r5, [r4]
+    memory_atomic_leave
+#else
+    dmb sy
+    str r1, [r0]
+    dmb sy
+    bx lr
+#endif
+.size __atomic_store_4, .-__atomic_store_4
+// End function: __atomic_store_4.
+.ltorg
+
+// Function: __atomic_compare_exchange_4. Returns 0 or 1 in r0.
+.section .text.__atomic_compare_exchange_4,"ax",%progbits
+.p2align 2
+.global __atomic_compare_exchange_4
+.type __atomic_compare_exchange_4,%function
+.thumb_func
+__atomic_compare_exchange_4:
+#if RP2040
+    memory_atomic_enter
+    ldr r0, [r4]
+    ldr r1, [r5]
+    cmp r0, r1
+    bne .Latomic_compare_mismatch
+    str r6, [r4]
+    movs r0, #1
+    b .Latomic_compare_done
+.Latomic_compare_mismatch:
+    str r0, [r5]
+    movs r0, #0
+.Latomic_compare_done:
+    memory_atomic_leave
+#else
+    dmb sy
+.Latomic_compare_retry:
+    ldrex r3, [r0]
+    ldr r12, [r1]
+    cmp r3, r12
+    bne .Latomic_compare_mismatch
+    strex r12, r2, [r0]
+    cmp r12, #0
+    bne .Latomic_compare_retry
+    movs r0, #1
+    b .Latomic_compare_done
+.Latomic_compare_mismatch:
+    clrex
+    str r3, [r1]
+    movs r0, #0
+.Latomic_compare_done:
+    dmb sy
+    bx lr
+#endif
+.size __atomic_compare_exchange_4, .-__atomic_compare_exchange_4
+// End function: __atomic_compare_exchange_4.
+.ltorg
 
 // -----------------------------------------------------------------------------
 // Function: rp2_memory_barrier() [No Stack Frames]
@@ -194,7 +331,7 @@ rp2_stack_peak_used_bytes:
 .equ MEMORY_BLOCK_WORDS,      4
 .equ MEMORY_BLOCK_BYTES,      (MEMORY_BLOCK_WORDS * MEMORY_WORD_BYTES)
 .equ MEMORY_MID_BLOCK_WORDS,   8
-.equ MEMORY_MID_BLOCK_BYTES,   (MEMORY_MID_BLOCK_WORDS * MEMORY_WORD_BYTES)
+.equ MEMORY_MID_BLOCK_BYTES,  (MEMORY_MID_BLOCK_WORDS * MEMORY_WORD_BYTES)
 .equ MEMORY_LARGE_BLOCK_WORDS, 16
 .equ MEMORY_LARGE_BLOCK_BYTES, (MEMORY_LARGE_BLOCK_WORDS * MEMORY_WORD_BYTES)
 .equ MEMORY_ALIGNMENT_MASK,   (MEMORY_WORD_BYTES - 1)
@@ -253,7 +390,6 @@ memcpy:
     subs r2, #MEMORY_LARGE_BLOCK_BYTES
     cmp r2, #MEMORY_LARGE_BLOCK_BYTES
     bhs .Lcopy_large_blocks
-
     // The bulk loop leaves count < 64, so one 32-byte block is sufficient.
     // if count >= 32 { copyWordsForward(8); dst += 32; src += 32; count -= 32 }
 .Lcopy_mid_check:
@@ -266,7 +402,6 @@ memcpy:
     adds r0, #MEMORY_MID_BLOCK_BYTES
     adds r1, #MEMORY_MID_BLOCK_BYTES
     subs r2, #MEMORY_MID_BLOCK_BYTES
-
     // Now count < 32: handle at most one 16-byte block before the word/byte tail.
 .Lcopy_small_check:
     cmp r2, #MEMORY_BLOCK_BYTES
@@ -283,7 +418,6 @@ memcpy:
     adds r0, #MEMORY_BLOCK_BYTES
     adds r1, #MEMORY_BLOCK_BYTES
     subs r2, #MEMORY_BLOCK_BYTES
-
     // Copy the remaining zero to three words, then zero to three bytes.
     // while count >= 4 { store32(dst, load32(src)); dst += 4; src += 4; count -= 4 }
 .Lcopy_words:
@@ -376,7 +510,6 @@ memmove:
     subs r2, #MEMORY_LARGE_BLOCK_BYTES
     cmp r2, #MEMORY_LARGE_BLOCK_BYTES
     bhs .Lmove_large_blocks
-
     // The bulk loop leaves count < 64, so one 32-byte block is sufficient.
     // if count >= 32 { dst -= 32; src -= 32; copyWordsBackward(8); count -= 32 }
 .Lmove_mid_check:
@@ -389,7 +522,6 @@ memmove:
     str r3, [r0, #(\word * MEMORY_WORD_BYTES)]
     .endr
     subs r2, #MEMORY_MID_BLOCK_BYTES
-
     // Now count < 32: handle at most one 16-byte block before the word/byte tail.
 .Lmove_small_check:
     cmp r2, #MEMORY_BLOCK_BYTES
@@ -406,7 +538,6 @@ memmove:
     ldr r3, [r1]
     str r3, [r0]
     subs r2, #MEMORY_BLOCK_BYTES
-
     // Copy remaining words backward, then handle the byte prefix.
     // while count >= 4 { dst -= 4; src -= 4; store32(dst, load32(src)); count -= 4 }
 .Lmove_words:
@@ -481,7 +612,6 @@ memset:
     subs r2, #MEMORY_LARGE_BLOCK_BYTES
     cmp r2, #MEMORY_LARGE_BLOCK_BYTES
     bhs .Lset_large_blocks
-
     // The bulk loop leaves count < 64, so one 32-byte block is sufficient.
     // if count >= 32 { fillWords(8); dst += 32; count -= 32 }
 .Lset_mid_check:
@@ -492,7 +622,6 @@ memset:
     .endr
     adds r0, #MEMORY_MID_BLOCK_BYTES
     subs r2, #MEMORY_MID_BLOCK_BYTES
-
     // Now count < 32: handle at most one 16-byte block before the word/byte tail.
 .Lset_small_check:
     cmp r2, #MEMORY_BLOCK_BYTES
@@ -504,7 +633,6 @@ memset:
     str r1, [r0, #(3 * MEMORY_WORD_BYTES)]
     adds r0, #MEMORY_BLOCK_BYTES
     subs r2, #MEMORY_BLOCK_BYTES
-
     // Fill remaining words, then the byte tail.
     // while count >= 4 { store32(dst, word); dst += 4; count -= 4 }
 .Lset_words:

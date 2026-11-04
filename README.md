@@ -107,10 +107,10 @@ cores' stacks and guards; the space between them is unused and has no heap alloc
 | `.data` | Global data with initial values stored in flash | Determined by the compiler and linker |
 | `.bss` | Global data cleared to zero at startup | Determined by the compiler and linker |
 | Unallocated space | Room for global data to grow | Remaining SRAM below the stack and any guard region |
-| Stack | Local values, saved registers, and temporary storage | Reserve 8 KiB per core on both chips |
-| MPU guard (RP2040 only) | Deny accesses immediately below each core's stack | Reserve 4 KiB per core |
+| Stack | Local values, saved registers, and temporary storage | Reserve 4 KiB per core on both chips |
+| MPU guard (RP2040 only) | Deny accesses immediately below each core's stack | Reserve the MPU minimum of 256 bytes per core |
 
-The total stack/guard reservation is 24 KiB on RP2040 and 16 KiB on RP2350.
+The total stack/guard reservation is 8.5 KiB on RP2040 and 8 KiB on RP2350.
 
 Global fixed-size buffers count toward `.data` or `.bss`; the linker places them
 below the reserved stack regions shown in the diagrams.
@@ -120,20 +120,23 @@ RP2040: 264 KiB total (270,336 bytes)
 
 0x20042000 +----------------------------------+ STACK_TOP / SRAM end
            | Core 0 stack                     |
-           | 8,192 bytes (8 KiB)               |
+           | 4,096 bytes (4 KiB)               |
            | Grows downward: v                |
-0x20040000 +----------------------------------+ STACK_BOTTOM
+0x20041000 +----------------------------------+ STACK_BOTTOM
            | Core 0 MPU guard: no access      |
-           | 4,096 bytes (4 KiB)               |
-0x2003F000 +----------------------------------+ STACK_GUARD_BOTTOM / CORE1_STACK_TOP
+           | 256 bytes                         |
+0x20040F00 +----------------------------------+ STACK_GUARD_BOTTOM / CORE1_STACK_TOP
            | Core 1 stack                     |
-           | 8,192 bytes (8 KiB)               |
-           | Grows downward: v                |
-0x2003D000 +----------------------------------+ CORE1_STACK_BOTTOM
-           | Core 1 MPU guard: no access      |
            | 4,096 bytes (4 KiB)               |
-0x2003C000 +----------------------------------+ CORE1_STACK_GUARD_BOTTOM
+           | Grows downward: v                |
+0x2003FF00 +----------------------------------+ CORE1_STACK_BOTTOM
+           | Core 1 MPU guard: no access      |
+           | 256 bytes                         |
+0x2003FE00 +----------------------------------+ CORE1_STACK_GUARD_BOTTOM
            | Unused SRAM                      |
+           |                                  |
+           ~                                  ~
+           ~                                  ~
            |                                  |
            +----------------------------------+ __bss_end <= CORE1_STACK_GUARD_BOTTOM
            | .bss: zero-initialized globals    |
@@ -145,14 +148,17 @@ RP2350: 520 KiB total (532,480 bytes)
 
 0x20082000 +----------------------------------+ STACK_TOP / SRAM end
            | Core 0 stack                     |
-           | 8,192 bytes (8 KiB)               |
+           | 4,096 bytes (4 KiB)               |
            | Grows downward: v                |
-0x20080000 +----------------------------------+ STACK_BOTTOM / core 0 MSPLIM / CORE1_STACK_TOP
+0x20081000 +----------------------------------+ STACK_BOTTOM / core 0 MSPLIM / CORE1_STACK_TOP
            | Core 1 stack                     |
-           | 8,192 bytes (8 KiB)               |
+           | 4,096 bytes (4 KiB)               |
            | Grows downward: v                |
-0x2007E000 +----------------------------------+ CORE1_STACK_BOTTOM / core 1 MSPLIM
+0x20080000 +----------------------------------+ CORE1_STACK_BOTTOM / core 1 MSPLIM
            | Unused SRAM                      |
+           |                                  |
+           ~                                  ~
+           ~                                  ~
            |                                  |
            +----------------------------------+ __bss_end <= CORE1_STACK_BOTTOM
            | .bss: zero-initialized globals    |
@@ -162,7 +168,7 @@ RP2350: 520 KiB total (532,480 bytes)
 ```
 
 The linker enforces the `.bss` limits shown in the diagrams. Each core installs
-its own protection: a 4 KiB MPU guard below its 8 KiB stack on RP2040, or `MSPLIM`
+its own protection: a 256-byte MPU guard below its 4 KiB stack on RP2040, or `MSPLIM`
 at its stack bottom on RP2350. Startup faults stop in `rp2_fault` before Swift runs
 on the affected core.
 

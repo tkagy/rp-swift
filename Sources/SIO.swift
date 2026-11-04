@@ -33,6 +33,19 @@ enum SIO {
 
     private static var isInitialized = false
 
+    // RP2040 compiler atomics use the highest-index SIO lock, 31. This is a
+    // software allocation choice, not a hardware-special lock; it keeps 0...30
+    // available to applications. Reserve it even before SIO.initialize because
+    // lazy static initialization can run earlier. RP2350 atomics use LDREX/STREX
+    // and reserve no SIO lock.
+    private static var runtimeReservedSpinlocks: UInt32 {
+        #if RP2040
+        1 << 31
+        #else
+        0
+        #endif
+    }
+
     enum Core: UInt32 { case core0 = 0, core1 }
 
     /// SIO.CPUID identifies the executing core, unlike the Arm CPU-part register.
@@ -51,7 +64,7 @@ enum SIO {
         precondition(!isInitialized, "SIO is already initialized")
 
         for index in UInt32(0)..<Spinlock.count {
-            if spec.usableSpinlocks & (UInt32(1) << index) != 0 {
+            if spec.usableSpinlocks & ~runtimeReservedSpinlocks & (UInt32(1) << index) != 0 {
                 spinlock(index).unlock()
             }
         }
@@ -425,10 +438,13 @@ enum SIO {
         }
     }
 
-    /// All 32 locks on RP2040. RP2350-E2 restricts this API to safe lock numbers:
+    /// Locks 0...30 on RP2040; lock 31 is reserved for compiler atomics.
+    /// RP2350-E2 restricts this API to safe lock numbers:
     /// 5...7, 10...11, 18...31. There is no implicit allocation or CAS reservation.
     static func spinlock(_ index: UInt32) -> Spinlock {
         precondition(index < Spinlock.count)
+        precondition(runtimeReservedSpinlocks & (UInt32(1) << index) == 0,
+                     "Spinlock is reserved for compiler atomics")
         precondition(spec.usableSpinlocks & (UInt32(1) << index) != 0,
                      "Spinlock is affected by RP2350-E2")
         return Spinlock(index: index)

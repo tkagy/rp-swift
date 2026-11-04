@@ -66,16 +66,16 @@ MEMORY {
 }
 STACK_TOP = ORIGIN(RAM) + LENGTH(RAM); /* 0x20082000: just past SRAM, aligned to 8 bytes */
 
-/* The top 8 KiB is stack space. rp2_core0_entry sets MSPLIM to STACK_BOTTOM before Swift.
+/* The top 4 KiB is stack space. rp2_core0_entry sets MSPLIM to STACK_BOTTOM before Swift.
    The CPU checks stack-pointer updates; no separate MPU guard is required. */
-STACK_RESERVED_BYTES = 8K;
+STACK_RESERVED_BYTES = 4K;
 STACK_BOTTOM = STACK_TOP - STACK_RESERVED_BYTES;
 STACK_GUARD_BYTES = 0;
 STACK_GUARD_BOTTOM = STACK_BOTTOM;
 
-/* Core 1 uses its own 8 KiB stack and Secure MSPLIM, set before entering Swift. */
+/* Core 1 uses its own 4 KiB stack and Secure MSPLIM, set before entering Swift. */
 CORE1_STACK_TOP = STACK_GUARD_BOTTOM;
-CORE1_STACK_RESERVED_BYTES = 8K;
+CORE1_STACK_RESERVED_BYTES = 4K;
 CORE1_STACK_BOTTOM = CORE1_STACK_TOP - CORE1_STACK_RESERVED_BYTES;
 CORE1_STACK_GUARD_BYTES = 0;
 CORE1_STACK_GUARD_BOTTOM = CORE1_STACK_BOTTOM;

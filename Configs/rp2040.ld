@@ -50,20 +50,20 @@ MEMORY {
 }
 STACK_TOP = ORIGIN(RAM) + LENGTH(RAM); /* 0x20042000: just past SRAM, aligned to 8 bytes */
 
-/* The top 8 KiB is stack space. The 4 KiB immediately below is an MPU guard.
+/* The top 4 KiB is stack space. The 256-byte region immediately below is an MPU guard.
    rp2_core0_entry installs the guard after RAM initialization and before Swift. */
-STACK_RESERVED_BYTES = 8K;
+STACK_RESERVED_BYTES = 4K;
 STACK_BOTTOM = STACK_TOP - STACK_RESERVED_BYTES;
-STACK_GUARD_BYTES = 4K;
+STACK_GUARD_BYTES = 256;
 STACK_GUARD_BOTTOM = STACK_BOTTOM - STACK_GUARD_BYTES;
 /* Cortex-M0+ MPU SIZE = log2(region bytes) - 1. ASSERT below requires a power of
    two, so LOG2CEIL is exact. Compute this at link time, not during startup. */
 STACK_GUARD_MPU_SIZE = LOG2CEIL(STACK_GUARD_BYTES) - 1;
 
-/* Core 1 has an independent 8 KiB stack and a 4 KiB MPU guard matching core 0's.
+/* Core 1 has an independent 4 KiB stack and a 256-byte MPU guard matching core 0's.
    Keep both core 1 regions below core 0's guard; only core 1 protects this guard. */
 CORE1_STACK_TOP = STACK_GUARD_BOTTOM;
-CORE1_STACK_RESERVED_BYTES = 8K;
+CORE1_STACK_RESERVED_BYTES = 4K;
 CORE1_STACK_BOTTOM = CORE1_STACK_TOP - CORE1_STACK_RESERVED_BYTES;
 CORE1_STACK_GUARD_BYTES = STACK_GUARD_BYTES;
 CORE1_STACK_GUARD_BOTTOM = CORE1_STACK_BOTTOM - CORE1_STACK_GUARD_BYTES;

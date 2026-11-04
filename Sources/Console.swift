@@ -120,7 +120,12 @@ enum Console {
         }
     }
 
-    private struct OutputBuffer {
+    // ~Copyable prevents accidental by-value copies of this 1 KiB+ inline queue.
+    // Queue operations mutate its per-device static-storage instance in place,
+    // so a local copy would waste scarce stack and duplicate queued output.
+    private struct OutputBuffer: ~Copyable {
+        // Stack-sensitive: this inline queue is over 1 KiB. Keep its owning
+        // buffer in static storage and avoid whole-buffer local copies.
         private var fragments = InlineArray<32, OutputFragment?>(repeating: nil)
         private var head = 0
         private var count = 0
@@ -158,9 +163,12 @@ enum Console {
         let time: UInt64
     }
 
-    private struct ReceiveBuffer {
-        private var bytes = InlineArray<128, UInt8>(repeating: 0)
-        private var times = InlineArray<128, UInt64>(repeating: 0)
+    // ~Copyable keeps the ring metadata tied to its static per-device backing
+    // storage; copying it would make the slice index and ring state diverge.
+    private struct ReceiveBuffer: ~Copyable {
+        // Large byte/timestamp arrays live in Console's flat static storage.
+        // This buffer owns only the per-device ring metadata and its slice index.
+        let deviceIndex: Int
         private var head = 0
         private var count = 0
         private var skipDiscardedLineFeed = false
@@ -181,7 +189,7 @@ enum Console {
                 }
                 return
             }
-            guard count < bytes.count else {
+            guard count < Console.receiveCapacity else {
                 // Invalidate all queued input rather than executing a truncated command.
                 head = 0
                 count = 0
@@ -190,16 +198,16 @@ enum Console {
                 skipDiscardedLineFeed = byte == Key.carriageReturn
                 return
             }
-            let tail = (head + count) % bytes.count
-            bytes[tail] = byte
-            times[tail] = time
+            let tail = (head + count) % Console.receiveCapacity
+            Console.receiveBytes[deviceIndex * Console.receiveCapacity + tail] = byte
+            Console.receiveTimes[deviceIndex * Console.receiveCapacity + tail] = time
             count += 1
         }
 
         mutating func pop() -> ReceivedByte? {
             guard count > 0 else { return nil }
-            let byte = ReceivedByte(value: bytes[head], time: times[head])
-            head = (head + 1) % bytes.count
+            let byte = ReceivedByte(value: Console.receiveBytes[deviceIndex * Console.receiveCapacity + head], time: Console.receiveTimes[deviceIndex * Console.receiveCapacity + head])
+            head = (head + 1) % Console.receiveCapacity
             count -= 1
             return byte
         }
@@ -237,7 +245,13 @@ enum Console {
         }
 
         mutating func clear() {
-            self = InputBuffer()
+            // Only bytes below count are readable. Keep the backing storage and
+            // reset metadata instead of constructing and copying a new buffer.
+            count = 0
+            overflow = false
+            skipLineFeed = false
+            clearEscape()
+            historyOffset = nil
         }
 
         mutating func clearEscape() {
@@ -345,18 +359,22 @@ enum Console {
 
     private static var serialDevices: SerialDeviceList = [nil, nil]
 
-    // Keep the static initial value as [nil, nil]. With the current compiler,
-    // [InputBuffer(), InputBuffer()] generated a lazy, once-only initializer.
-    // Its synchronization required __atomic_load_4, __atomic_compare_exchange_4,
-    // and __atomic_store_4, which this RP2040 runtime does not provide.
-    // Creating each buffer explicitly in add() avoids that initialization guard;
-    // no atomic operations are needed for this static initialization.
-    private static var inputBuffers: InlineArray<2, InputBuffer?> = [nil, nil]
+    // Construct buffers in their final static storage. Compiler-generated once
+    // guards use the atomic ABI in Memory.S on RP2040 and CPU atomics on RP2350.
+    private static var inputBuffers: InlineArray<2, InputBuffer> = .init { _ in InputBuffer() }
 
     // Preserve each device's unfinished input while it browses shared history.
     private static var drafts: InlineArray<2, InputBuffer?> = [nil, nil]
-    private static var outputBuffers: InlineArray<2, OutputBuffer?> = [nil, nil]
-    private static var receiveBuffers: InlineArray<2, ReceiveBuffer?> = [nil, nil]
+    // Stack-sensitive: keep this noncopyable queue in static storage. The
+    // element initializer avoids assembling a whole array as a local value.
+    private static var outputBuffers: InlineArray<2, OutputBuffer> = .init { _ in OutputBuffer() }
+    private static let receiveCapacity = 128
+    // Two contiguous 128-element slices, one per registered device. Keeping
+    // these arrays flat lets zero initialization reside in .bss; nested array
+    // construction generated multi-KiB stack temporaries with this compiler.
+    private static var receiveBytes: InlineArray<256, UInt8> = .init(repeating: 0)
+    private static var receiveTimes: InlineArray<256, UInt64> = .init(repeating: 0)
+    private static var receiveBuffers: InlineArray<2, ReceiveBuffer> = .init { ReceiveBuffer(deviceIndex: $0) }
     private static var pendingCommands: InlineArray<2, Command?> = [nil, nil]
     private static var promptRequested: InlineArray<2, Bool> = [false, false]
 
@@ -387,34 +405,33 @@ enum Console {
 
             for _ in 0..<ioByteBudget {
                 guard let byte = device.readByte() else { break }
-                receiveBuffers[index]?.append(byte, at: now)
+                receiveBuffers[index].append(byte, at: now)
             }
 
-            if receiveBuffers[index]!.needsOverflowNotice,
-               outputBuffers[index]!.available >= responseFragmentReserve,
+            if receiveBuffers[index].needsOverflowNotice,
+               outputBuffers[index].available >= responseFragmentReserve,
                pendingCommands[index] == nil {
-                inputBuffers[index]?.clear()
+                inputBuffers[index].clear()
                 drafts[index] = nil
                 write("\r\nInput overflow. Line discarded.\r\n", to: index)
                 prompt(to: index)
-                receiveBuffers[index]?.needsOverflowNotice = false
+                receiveBuffers[index].needsOverflowNotice = false
             }
 
-            if !receiveBuffers[index]!.needsOverflowNotice && pendingCommands[index] == nil {
+            if !receiveBuffers[index].needsOverflowNotice && pendingCommands[index] == nil {
                 for _ in 0..<ioByteBudget {
-                    guard outputBuffers[index]!.available >= responseFragmentReserve,
-                          let byte = receiveBuffers[index]?.pop() else { break }
+                    guard outputBuffers[index].available >= responseFragmentReserve,
+                          let byte = receiveBuffers[index].pop() else { break }
                     receive(byte.value, at: byte.time, from: index)
                     if pendingCommands[index] != nil { break }
                 }
             }
-            if receiveBuffers[index]!.isEmpty, var input = inputBuffers[index] {
-                expireEscape(&input, at: now)
-                inputBuffers[index] = input
+            if receiveBuffers[index].isEmpty {
+                expireEscape(&inputBuffers[index], at: now)
             }
             if promptRequested[index], pendingCommands[index] == nil,
-               outputBuffers[index]!.available >= responseFragmentReserve {
-                if let input = inputBuffers[index] { redraw(input, to: index) }
+               outputBuffers[index].available >= responseFragmentReserve {
+                redraw(inputBuffers[index], to: index)
                 promptRequested[index] = false
             }
             drainOutput(to: index)
@@ -441,38 +458,22 @@ enum Console {
         }
         guard nextDeviceIndex < serialDevices.count else { return .full }
         serialDevices[nextDeviceIndex] = device
-        // Initialize at registration time instead of in the static initializer above.
-        inputBuffers[nextDeviceIndex] = InputBuffer()
-        initializeOutput(at: nextDeviceIndex)
-        initializeReceive(at: nextDeviceIndex)
         prompt(to: nextDeviceIndex)
         nextDeviceIndex += 1
         return .added
     }
 
-    // Keep large initialization temporaries in separate stack frames. Combining
-    // both constructors in add() exceeded the firmware's 4 KiB stack reservation.
-    @inline(never)
-    private static func initializeOutput(at deviceIndex: Int) {
-        outputBuffers[deviceIndex] = OutputBuffer()
-    }
-
-    @inline(never)
-    private static func initializeReceive(at deviceIndex: Int) {
-        receiveBuffers[deviceIndex] = ReceiveBuffer()
-    }
-
     private static func write(_ text: StaticString, to deviceIndex: Int) {
-        outputBuffers[deviceIndex]?.append(.text(text))
+        outputBuffers[deviceIndex].append(.text(text))
     }
 
     private static func write(byte: UInt8, to deviceIndex: Int) {
-        outputBuffers[deviceIndex]?.append(.byte(byte))
+        outputBuffers[deviceIndex].append(.byte(byte))
     }
 
     private static func drainOutput(to deviceIndex: Int) {
         guard let device = serialDevices[deviceIndex] else { return }
-        outputBuffers[deviceIndex]?.poll(to: device)
+        outputBuffers[deviceIndex].poll(to: device)
     }
 
     // Queue immutable prompt/input fragments; UART transmission happens in poll().
@@ -480,20 +481,30 @@ enum Console {
         write(name, to: deviceIndex)
         write(" >> ", to: deviceIndex)
         if let input = input {
-            outputBuffers[deviceIndex]?.append(.line(input.bytes, input.count))
+            outputBuffers[deviceIndex].append(.line(input.bytes, input.count))
         }
     }
 
     // MARK: - Input handling
 
+    // Keep input processing out of poll's frame: inlining combines its scratch
+    // storage with the RX/TX polling temporaries on both Arm targets.
+    @inline(never)
     private static func receive(_ byte: UInt8, at time: UInt64, from deviceIndex: Int) {
-        guard var input = inputBuffers[deviceIndex] else { return }
-        defer { inputBuffers[deviceIndex] = input }
+        let historyInserted = receive(byte, at: time, input: &inputBuffers[deviceIndex], from: deviceIndex)
+        // End the exclusive access to inputBuffers before touching another port.
+        if historyInserted { shiftHistoryOffsets(afterInputFrom: deviceIndex) }
+    }
+
+    // Mutate the stored input in place; do not copy it out and write it back
+    // for every received byte. True reports an insertion into shared history.
+    private static func receive(_ byte: UInt8, at time: UInt64,
+                                input: inout InputBuffer, from deviceIndex: Int) -> Bool {
         expireEscape(&input, at: time)
 
         let skipLineFeed = input.skipLineFeed
         input.skipLineFeed = false
-        if byte == Key.lineFeed && skipLineFeed { return }
+        if byte == Key.lineFeed && skipLineFeed { return false }
 
         if byte == Key.carriageReturn || byte == Key.lineFeed {
             input.clearEscape()
@@ -501,10 +512,10 @@ enum Console {
             input.clearEscape()
             input.escapeState = .escape
             input.escapeDeadline = time &+ escapeTimeoutMicroseconds
-            return
+            return false
         } else if input.escapeState != .none,
                   receiveEscape(byte, input: &input, from: deviceIndex) {
-            return
+            return false
         }
 
         switch byte {
@@ -518,8 +529,9 @@ enum Console {
             complete(&input, to: deviceIndex)
 
         case Key.carriageReturn, Key.lineFeed:
-            processLine(&input, from: deviceIndex)
+            let historyInserted = processLine(&input, from: deviceIndex)
             input.skipLineFeed = byte == Key.carriageReturn
+            return historyInserted
 
         case Key.backspace, Key.delete:
             if input.removeLast() {
@@ -538,19 +550,22 @@ enum Console {
         default:
             break
         }
+        return false
     }
 
-    private static func processLine(_ input: inout InputBuffer, from deviceIndex: Int) {
+    private static func processLine(_ input: inout InputBuffer, from deviceIndex: Int) -> Bool {
+        let historyInserted = !input.overflow && input.count > 0
         write("\r\n", to: deviceIndex)
         if input.overflow {
             write("Line too long.\r\n", to: deviceIndex)
         } else {
-            remember(input, from: deviceIndex)
+            if historyInserted { History.add(input) }
             command(input, from: deviceIndex)
         }
         drafts[deviceIndex] = nil
         input.clear()
         if pendingCommands[deviceIndex] == nil { prompt(to: deviceIndex) }
+        return historyInserted
     }
 
     private static func expireEscape(_ input: inout InputBuffer, at time: UInt64) {
@@ -606,23 +621,18 @@ enum Console {
         drafts[deviceIndex] = nil
     }
 
-    private static func remember(_ input: InputBuffer, from deviceIndex: Int) {
-        guard input.count > 0 else { return }
-        History.add(input)
-
+    private static func shiftHistoryOffsets(afterInputFrom deviceIndex: Int) {
         // New entries shift the other device's browsing position with its entry.
         // If an entry is evicted, retain the displayed line as independent input.
         // This also avoids writing into the other port's potentially full TX queue.
         for index in inputBuffers.indices where index != deviceIndex {
-            guard var otherInput = inputBuffers[index],
-                  let offset = otherInput.historyOffset else { continue }
+            guard let offset = inputBuffers[index].historyOffset else { continue }
             let shiftedOffset = offset + 1
             if shiftedOffset < History.count {
-                otherInput.historyOffset = shiftedOffset
+                inputBuffers[index].historyOffset = shiftedOffset
             } else {
-                detachHistory(&otherInput, from: index)
+                detachHistory(&inputBuffers[index], from: index)
             }
-            inputBuffers[index] = otherInput
         }
     }
 
@@ -641,7 +651,11 @@ enum Console {
             showHistory(&input, at: offset - 1, to: deviceIndex)
             return
         }
-        input = drafts[deviceIndex] ?? InputBuffer()
+        if let draft = drafts[deviceIndex] {
+            input = draft
+        } else {
+            input.clear()
+        }
         drafts[deviceIndex] = nil
         redraw(input, to: deviceIndex)
     }
@@ -733,7 +747,7 @@ enum Console {
 
     private static func finishPendingCommand(from deviceIndex: Int) {
         guard let command = pendingCommands[deviceIndex],
-              outputBuffers[deviceIndex]!.isEmpty,
+              outputBuffers[deviceIndex].isEmpty,
               let device = serialDevices[deviceIndex], !device.isTransmitting else { return }
         pendingCommands[deviceIndex] = nil
         // Wait for FIFO and shift-register completion via later polls, never flush().
