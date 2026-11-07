@@ -47,16 +47,27 @@ enum RP2350 {
         static let postDivider2: UInt32 = 2
     }
 
+    enum USBController {
+        static let bulkPacketBytes = 64
+    }
+
+    enum USBPLL {
+        static let base: UInt32 = 0x4005_8000
+    }
+
     enum Clock {
         static let base: UInt32 = 0x4001_0000
         static let dividerIntegerShift: UInt32 = 16
         static let resuscitationOffset: UInt32 = 0x84
+        static let usbControlOffset: UInt32 = 0x60
     }
 
     enum Reset {
         static let base: UInt32 = 0x4002_0000
         static let doneOffset: UInt32 = 0x08
         static let systemPLL: UInt32 = 1 << 14
+        static let usbPLL: UInt32 = 1 << 15
+        static let usb: UInt32 = 1 << 28
         static let timer: UInt32 = 1 << 23 // TIMER0; leave TIMER1 untouched.
         static let uart0: UInt32 = 1 << 26
         static let uart1: UInt32 = 1 << 27

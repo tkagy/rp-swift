@@ -1,8 +1,7 @@
 // Copyright (c) 2026 tkagy <248091500+tkagy@users.noreply.github.com>
 // SPDX-License-Identifier: MIT
 
-protocol ConsoleTransport {
-    mutating func poll()
+protocol ConsoleTransport: ~Copyable {
     mutating func readByte() -> UInt8?
     /// Return false without waiting when the transmitter cannot accept a byte.
     mutating func tryWrite(byte: UInt8) -> Bool
@@ -11,7 +10,7 @@ protocol ConsoleTransport {
 
 /// One console broadcasts its prompt to all attached devices.
 /// Initialize Timer first and call poll frequently from a single execution context.
-/// Output is queued in fixed inline storage; poll never waits for UART TX space.
+/// Output is queued in fixed inline storage; poll never waits for transport space.
 enum Console {
     // MARK: - Types
 
@@ -19,45 +18,17 @@ enum Console {
         case added, alreadyRegistered, full
     }
 
-    // private static var devices: InlineArray<2, (any ConsoleTransport)?> = [nil, nil]
-    // Storing Serial Device as any ConsoleTransport introduced heap allocation,
-    // which this firmware does not support.
-    // Use concrete enum cases to keep devices inline and avoid existential boxes 
-    // and their heap allocation requirements.
-    private enum SerialDevice: ConsoleTransport {
+    // UART is stored inline. ACM resolves through its statically stored
+    // Composite, which remains the owner of the live function state.
+    private enum SerialDevice {
         case uart(UART)
-        //case cdc(UsbCDC)
-        func poll() {
-            switch self {
-            case .uart(let uart): uart.poll()
-            //case .cdc(let cdc): cdc.poll()
-            }
-        }
+        case acm(UnsafeMutablePointer<Composite>)
 
-        func readByte() -> UInt8? {
-            switch self {
-            case .uart(let uart): uart.readByte()
-            //case .cdc(let cdc): cdc.readByte()
-            }
-        }
-
-        func tryWrite(byte: UInt8) -> Bool {
-            switch self {
-            case .uart(let uart): uart.tryWrite(byte: byte)
-            }
-        }
-
-        var isTransmitting: Bool {
-            switch self {
-            case .uart(let uart): uart.isTransmitting
-            }
-        }
-
-        // Compare hardware identity, independent of each handle's configuration.
         func isSameDevice(as other: SerialDevice) -> Bool {
             switch (self, other) {
-            case (.uart(let first), .uart(let second)):
-                first.port == second.port
+            case (.uart(let first), .uart(let second)): first.port == second.port
+            case (.acm(let first), .acm(let second)): first == second
+            default: false
             }
         }
     }
@@ -134,6 +105,16 @@ enum Console {
         var isEmpty: Bool { count == 0 }
         var available: Int { fragments.count - count }
 
+        mutating func clear() {
+            while count > 0 {
+                fragments[head] = nil
+                head = (head + 1) % fragments.count
+                count -= 1
+            }
+            head = 0
+            offset = 0
+        }
+
         mutating func append(_ fragment: OutputFragment) {
             guard fragment.count > 0 else { return }
             precondition(available > 0, "Console output reservation exhausted")
@@ -141,7 +122,7 @@ enum Console {
             count += 1
         }
 
-        mutating func poll(to device: SerialDevice) {
+        mutating func poll<T: ConsoleTransport & ~Copyable>(to device: inout T) {
             var budget = Console.ioByteBudget
             while count > 0 && budget > 0 {
                 guard let fragment = fragments[head] else { return }
@@ -176,6 +157,16 @@ enum Console {
         var needsOverflowNotice = false
 
         var isEmpty: Bool { count == 0 }
+
+        mutating func clear() {
+            head = 0
+            count = 0
+            skipDiscardedLineFeed = false
+            discarding = false
+            needsOverflowNotice = false
+        }
+
+        var available: Int { Console.receiveCapacity - count }
 
         mutating func append(_ byte: UInt8, at time: UInt64) {
             if skipDiscardedLineFeed {
@@ -353,6 +344,7 @@ enum Console {
         }
     }
 
+    // Serial transports use fixed inline storage.
     private typealias SerialDeviceList = InlineArray<2, SerialDevice?>
 
     // MARK: - Stored properties
@@ -369,7 +361,7 @@ enum Console {
     // element initializer avoids assembling a whole array as a local value.
     private static var outputBuffers: InlineArray<2, OutputBuffer> = .init { _ in OutputBuffer() }
     private static let receiveCapacity = 128
-    // Two contiguous 128-element slices, one per registered device. Keeping
+    // Contiguous 128-element slices, one per registered device. Keeping
     // these arrays flat lets zero initialization reside in .bss; nested array
     // construction generated multi-KiB stack temporaries with this compiler.
     private static var receiveBytes: InlineArray<256, UInt8> = .init(repeating: 0)
@@ -377,6 +369,7 @@ enum Console {
     private static var receiveBuffers: InlineArray<2, ReceiveBuffer> = .init { ReceiveBuffer(deviceIndex: $0) }
     private static var pendingCommands: InlineArray<2, Command?> = [nil, nil]
     private static var promptRequested: InlineArray<2, Bool> = [false, false]
+    private static var acmSessions: InlineArray<2, UInt32?> = [nil, nil]
 
     private static var nextDeviceIndex: Int = 0
     private static var name: StaticString = ""
@@ -394,49 +387,83 @@ enum Console {
         add(.uart(device))
     }
 
-    /// Service both ports with bounded RX/TX work. Call frequently to drain queued I/O.
-    /// UART writes must be owned by this console while a port is registered.
+    /// Register a Composite held in static storage. The Composite must not move
+    /// or be destroyed after registration.
+    @discardableResult
+    static func add(_ composite: UnsafeMutablePointer<Composite>) -> RegistrationResult {
+        add(.acm(composite))
+    }
+
+    /// Poll every registered serial transport. ACM values remain Composite-owned.
     static func poll() {
-        let now = Timer.microseconds
         for index in serialDevices.indices {
-            guard let device = serialDevices[index] else { continue }
-            device.poll()
-            drainOutput(to: index)
-
-            for _ in 0..<ioByteBudget {
-                guard let byte = device.readByte() else { break }
-                receiveBuffers[index].append(byte, at: now)
-            }
-
-            if receiveBuffers[index].needsOverflowNotice,
-               outputBuffers[index].available >= responseFragmentReserve,
-               pendingCommands[index] == nil {
-                inputBuffers[index].clear()
-                drafts[index] = nil
-                write("\r\nInput overflow. Line discarded.\r\n", to: index)
-                prompt(to: index)
-                receiveBuffers[index].needsOverflowNotice = false
-            }
-
-            if !receiveBuffers[index].needsOverflowNotice && pendingCommands[index] == nil {
-                for _ in 0..<ioByteBudget {
-                    guard outputBuffers[index].available >= responseFragmentReserve,
-                          let byte = receiveBuffers[index].pop() else { break }
-                    receive(byte.value, at: byte.time, from: index)
-                    if pendingCommands[index] != nil { break }
+            guard let registered = serialDevices[index] else { continue }
+            switch registered {
+            case .uart(var device):
+                poll(&device, at: index)
+            case .acm(let composite):
+                composite.pointee.withACM { acm in
+                    pollACM(&acm, at: index)
                 }
             }
-            if receiveBuffers[index].isEmpty {
-                expireEscape(&inputBuffers[index], at: now)
-            }
-            if promptRequested[index], pendingCommands[index] == nil,
-               outputBuffers[index].available >= responseFragmentReserve {
-                redraw(inputBuffers[index], to: index)
-                promptRequested[index] = false
-            }
-            drainOutput(to: index)
-            finishPendingCommand(from: index)
         }
+    }
+
+    private static func pollACM(_ acm: inout CDC.ACM, at index: Int) {
+        if acmSessions[index] != acm.stream.session {
+            resetSession(at: index)
+            acmSessions[index] = acm.stream.session
+        }
+        // The host can configure CDC before a terminal opens the serial port.
+        // Sending the startup prompt at that point produced garbage on the
+        // first RP2040 picocom connection. Wait for DTR (the host opened the
+        // port) before moving queued Console bytes into the USB stream.
+        guard acm.stream.isConfigured, acm.dtr else { return }
+        poll(&acm, at: index, canPauseReceive: true)
+    }
+
+    private static func poll<T: ConsoleTransport & ~Copyable>(
+        _ device: inout T, at index: Int, canPauseReceive: Bool = false
+    ) {
+        let now = Timer.microseconds
+        outputBuffers[index].poll(to: &device)
+
+        for _ in 0..<ioByteBudget {
+            // USB can propagate pressure back to the host with NAK. UART must
+            // keep draining hardware and retain its existing overflow policy.
+            if canPauseReceive && receiveBuffers[index].available == 0 { break }
+            guard let byte = device.readByte() else { break }
+            receiveBuffers[index].append(byte, at: now)
+        }
+
+        if receiveBuffers[index].needsOverflowNotice,
+           outputBuffers[index].available >= responseFragmentReserve,
+           pendingCommands[index] == nil {
+            inputBuffers[index].clear()
+            drafts[index] = nil
+            write("\r\nInput overflow. Line discarded.\r\n", to: index)
+            prompt(to: index)
+            receiveBuffers[index].needsOverflowNotice = false
+        }
+
+        if !receiveBuffers[index].needsOverflowNotice && pendingCommands[index] == nil {
+            for _ in 0..<ioByteBudget {
+                guard outputBuffers[index].available >= responseFragmentReserve,
+                      let byte = receiveBuffers[index].pop() else { break }
+                receive(byte.value, at: byte.time, from: index)
+                if pendingCommands[index] != nil { break }
+            }
+        }
+        if receiveBuffers[index].isEmpty {
+            expireEscape(&inputBuffers[index], at: now)
+        }
+        if promptRequested[index], pendingCommands[index] == nil,
+           outputBuffers[index].available >= responseFragmentReserve {
+            redraw(inputBuffers[index], to: index)
+            promptRequested[index] = false
+        }
+        outputBuffers[index].poll(to: &device)
+        finishPendingCommand(from: index, transmitting: device.isTransmitting)
     }
 
     /// Request a redraw on each registered device; poll performs the queued output.
@@ -471,12 +498,16 @@ enum Console {
         outputBuffers[deviceIndex].append(.byte(byte))
     }
 
-    private static func drainOutput(to deviceIndex: Int) {
-        guard let device = serialDevices[deviceIndex] else { return }
-        outputBuffers[deviceIndex].poll(to: device)
+    private static func resetSession(at index: Int) {
+        inputBuffers[index].clear()
+        drafts[index] = nil
+        outputBuffers[index].clear()
+        receiveBuffers[index].clear()
+        pendingCommands[index] = nil
+        promptRequested[index] = true
     }
 
-    // Queue immutable prompt/input fragments; UART transmission happens in poll().
+    // Queue immutable prompt/input fragments; transport writes happen in poll().
     private static func prompt(_ input: InputBuffer? = nil, to deviceIndex: Int) {
         write(name, to: deviceIndex)
         write(" >> ", to: deviceIndex)
@@ -745,12 +776,13 @@ enum Console {
         pendingCommands[deviceIndex] = .bootsel
     }
 
-    private static func finishPendingCommand(from deviceIndex: Int) {
+    private static func finishPendingCommand(from deviceIndex: Int, transmitting: Bool) {
         guard let command = pendingCommands[deviceIndex],
               outputBuffers[deviceIndex].isEmpty,
-              let device = serialDevices[deviceIndex], !device.isTransmitting else { return }
+              !transmitting else { return }
         pendingCommands[deviceIndex] = nil
-        // Wait for FIFO and shift-register completion via later polls, never flush().
+        // Wait for UART wire completion or USB ACK (including a trailing ZLP)
+        // via later polls, never a blocking flush().
         switch command {
         case .reset:
             if !Chip.BootControl.reset() {
@@ -766,3 +798,5 @@ enum Console {
         prompt(to: deviceIndex)
     }
 }
+
+extension CDC.ACM: ConsoleTransport {}

@@ -48,19 +48,28 @@ case "$MODE" in
     ''|--object-only) ;;
 esac
 BUILD_DIR="$PROJECT_DIR/.build/$CHIP"
-mkdir -p "$BUILD_DIR"
 
 # Compile both chips' firmware from the same sources with explicit chip selection.
 SWIFT_OBJECT="$BUILD_DIR/RP2.o"
+# Include driver directories without depending on shell globstar settings.
+SWIFT_SOURCES=()
+while IFS= read -r -d '' SWIFT_SOURCE; do
+    SWIFT_SOURCES+=("$SWIFT_SOURCE")
+done < <(find "$PROJECT_DIR/Sources" -type f -name '*.swift' -print0 | sort -z)
+SWIFT_DEFINES=()
+if [[ -n "${PRIVATE_TEST-}" ]]; then
+    SWIFT_DEFINES+=(-D PRIVATE_TEST)
+fi
 swiftc -target "$SWIFT_TARGET" \
     -D "$CHIP" \
+    "${SWIFT_DEFINES[@]}" \
     -module-cache-path "$BUILD_DIR/ModuleCache" \
     -enable-experimental-feature Embedded \
     -enable-experimental-feature Extern \
     -wmo -Osize -parse-as-library \
     -Xfrontend -function-sections \
     -Xfrontend -disable-stack-protector \
-    -emit-object "$PROJECT_DIR"/Sources/*.swift \
+    -emit-object "${SWIFT_SOURCES[@]}" \
     -o "$SWIFT_OBJECT"
 
 if [[ "$MODE" == --object-only ]]; then

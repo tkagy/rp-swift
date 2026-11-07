@@ -207,9 +207,6 @@ struct UART: ConsoleTransport {
         }
     }
 
-    /// UART uses direct register I/O and needs no background transport work.
-    func poll() {}
-
     /// Read without waiting, or return nil if RX is empty. UARTDR bits [7:0]
     /// contain data; [11:8] preserve overrun/break/parity/framing error flags.
     // RP2040 4.2.8 / RP2350 12.1.8: UARTFR.RXFE and UARTDR have the same layout.

@@ -73,6 +73,24 @@ enum RP2 {
     }
 
     enum Core0 {
+        enum USBInitializationStage: UInt32 {
+            case controller, device, console
+        }
+
+        struct USBInitializationFailure {
+            let stage: USBInitializationStage
+            let controllerStatus: USBController.ErrorCode
+            let controllerSnapshot: USBController.FailureSnapshot?
+            let deviceStatus: USBDevice<USBController, CompositeConfiguration>.ErrorCode?
+        }
+
+        // Keep the first failing stage and its diagnostics in static storage so
+        // faultHandler's terminal path does not erase the cause with locals.
+        private(set) static var usbInitializationFailure: USBInitializationFailure? = nil
+        // Console retains a pointer to this static storage after registration;
+        // initialize it in place and never move or replace it afterwards.
+        private static var composite = Composite()
+
         // Entered only after assembly startup initializes RAM and protects the stack.
         // The peripheral clock must be ready before either UART is initialized.
         static func initialize() {
@@ -81,12 +99,35 @@ enum RP2 {
             Timer.initialize()
             Console.initialize(name: Chip.name)
             Console.add(UART(.uart0).initialize(tx: 0, rx: 1, baudRate: 115_200))
+
+            usbInitializationFailure = nil
+            guard USBController.initialize(mode: .device, vbusDetection: .assumePresent) else {
+                usbInitializationFailure = .init(stage: .controller, controllerStatus: USBController.status,
+                    controllerSnapshot: USBController.failureSnapshot, deviceStatus: nil)
+                faultHandler()
+            }
+            guard composite.initialize(identity: CompositeConfiguration.identity) else {
+                usbInitializationFailure = .init(stage: .device, controllerStatus: composite.controllerStatus,
+                    controllerSnapshot: composite.controllerFailureSnapshot, deviceStatus: composite.status)
+                faultHandler()
+            }
+            guard Console.add(&composite) == .added else {
+                usbInitializationFailure = .init(stage: .console,
+                    controllerStatus: composite.controllerStatus,
+                    controllerSnapshot: composite.controllerFailureSnapshot,
+                    deviceStatus: composite.status)
+                faultHandler()
+            }
+
             Core1.launch()
         }
 
         // Main loop
         static func main() -> Never {
-            while true { Console.poll() }
+            while true {
+                composite.processEvents()
+                Console.poll()
+            }
         }
     }
 

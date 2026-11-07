@@ -37,6 +37,14 @@ enum Clock {
 
     // .none means no error; other cases identify a failure in this module.
     private(set) static var status: ErrorCode = .none
+    private(set) static var isInitialized = false
+
+    enum USBErrorCode: UInt32 {
+        case none = 0, systemClockNotReady, resetDidNotComplete, pllDidNotLock
+    }
+    static let usbFrequencyHz: UInt32 = 48_000_000
+    private(set) static var usbStatus: USBErrorCode = .none
+    private(set) static var isUSBInitialized = false
 
     // Each hardware register groups its handle with its bit definitions.
     private enum CLOCKS {
@@ -78,6 +86,16 @@ enum Clock {
             static let reg = RP2.Register32(address: Chip.Clock.base + 0x48)
             static let enable: UInt32 = 1 << 11
             static let sourceXosc: UInt32 = 0b100 << 5
+        }
+
+        enum CLK_USB_CTRL {
+            static let reg = RP2.Register32(address: Chip.Clock.base + Chip.Clock.usbControlOffset)
+            static let enable: UInt32 = 1 << 11
+            // AUXSRC=0 selects PLL_USB on both chips.
+        }
+
+        enum CLK_USB_DIV {
+            static let reg = RP2.Register32(address: Chip.Clock.base + Chip.Clock.usbControlOffset + 4)
         }
 
         #if RP2350
@@ -133,6 +151,30 @@ enum Clock {
         }
     }
 
+    private enum PLL_USB {
+        enum CS {
+            static let reg = RP2.Register32(address: Chip.USBPLL.base + 0x00)
+            static let locked: UInt32 = 1 << 31
+        }
+
+        enum PWR {
+            static let reg = RP2.Register32(address: Chip.USBPLL.base + 0x04)
+            static let powerDown: UInt32 = 1 << 0
+            static let vcoPowerDown: UInt32 = 1 << 5
+            static let postDividerPowerDown: UInt32 = 1 << 3
+        }
+
+        enum FBDIV_INT {
+            static let reg = RP2.Register32(address: Chip.USBPLL.base + 0x08)
+        }
+
+        enum PRIM {
+            static let reg = RP2.Register32(address: Chip.USBPLL.base + 0x0C)
+            static let divider1Shift: UInt32 = 16
+            static let divider2Shift: UInt32 = 12
+        }
+    }
+
     private enum RESETS {
         enum RESET {
             static let reg = RP2.Register32(address: Chip.Reset.base + 0x00)
@@ -145,11 +187,67 @@ enum Clock {
 
     // Initialization failures are fatal; retain the cause for debugger inspection.
     static func initialize() {
+        precondition(!isUSBInitialized, "System clocks cannot be reinitialized after USB clock startup")
+        isInitialized = false
         status = .none
         if let error = initializeClocks() {
             status = error
             faultHandler()
         }
+        isInitialized = true
+    }
+
+    // Optional 48 MHz domain, usable by either Device or a future Host driver.
+    // Keep USB PLL/mux ownership here, not inside a USB class or controller role.
+    // RP2040 2.15/2.18 and RP2350 8.1/8.6. A 12 MHz reference, FBDIV=40,
+    // POSTDIV1=5 and POSTDIV2=2 produce a 480 MHz VCO and 48 MHz output.
+    @discardableResult
+    static func initializeUSB() -> Bool {
+        if isUSBInitialized { return true }
+        guard isInitialized, systemFrequencyHz > usbFrequencyHz else {
+            usbStatus = .systemClockNotReady
+            return false
+        }
+        #if RP2040
+        // RP2040-E16 requires clk_sys >= 1.1 * clk_usb for reliable event capture.
+        // Integer ratios avoid floating point and preserve the documented margin.
+        let minimumSystemRatioNumerator: UInt64 = 11
+        let minimumSystemRatioDenominator: UInt64 = 10
+        guard UInt64(systemFrequencyHz) * minimumSystemRatioDenominator
+                >= UInt64(usbFrequencyHz) * minimumSystemRatioNumerator else {
+            usbStatus = .systemClockNotReady
+            return false
+        }
+        #endif
+        let control = CLOCKS.CLK_USB_CTRL.reg
+        control.clearBits(CLOCKS.CLK_USB_CTRL.enable)
+        for _ in 0..<clockSettleWaitReadCount { _ = control.value }
+        let reset = Chip.Reset.usbPLL
+        RESETS.RESET.reg.setBits(reset)
+        RESETS.RESET.reg.clearBits(reset)
+        guard waitFor(RESETS.RESET_DONE.reg.value, mask: reset, value: reset) else {
+            usbStatus = .resetDidNotComplete
+            return false
+        }
+        let referenceDivider: UInt32 = 1
+        let feedbackDivider: UInt32 = 40
+        let postDivider1: UInt32 = 5
+        let postDivider2: UInt32 = 2
+        PLL_USB.CS.reg.value = referenceDivider
+        PLL_USB.FBDIV_INT.reg.value = feedbackDivider
+        PLL_USB.PWR.reg.clearBits(PLL_USB.PWR.powerDown | PLL_USB.PWR.vcoPowerDown)
+        guard waitFor(PLL_USB.CS.reg.value, mask: PLL_USB.CS.locked, value: PLL_USB.CS.locked) else {
+            usbStatus = .pllDidNotLock
+            return false
+        }
+        PLL_USB.PRIM.reg.value = (postDivider1 << PLL_USB.PRIM.divider1Shift)
+            | (postDivider2 << PLL_USB.PRIM.divider2Shift)
+        PLL_USB.PWR.reg.clearBits(PLL_USB.PWR.postDividerPowerDown)
+        CLOCKS.CLK_USB_DIV.reg.value = CLOCKS.divideByOne
+        control.value = CLOCKS.CLK_USB_CTRL.enable
+        usbStatus = .none
+        isUSBInitialized = true
+        return true
     }
 
     private static func initializeClocks() -> ErrorCode? {

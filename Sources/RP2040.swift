@@ -48,16 +48,30 @@ enum RP2040 {
         static let postDivider2: UInt32 = 2
     }
 
+    enum USBController {
+        // Keep the established 32-byte transfer policy. RP2040 datasheet
+        // Appendix B's E15 software workaround is separate: USBController.swift
+        // gates Bulk IN buffer availability during each frame's final 200 us.
+        static let bulkPacketBytes = 32
+    }
+
+    enum USBPLL {
+        static let base: UInt32 = 0x4002_C000
+    }
+
     enum Clock {
         static let base: UInt32 = 0x4000_8000
         static let dividerIntegerShift: UInt32 = 8
         static let resuscitationOffset: UInt32 = 0x78
+        static let usbControlOffset: UInt32 = 0x54
     }
 
     enum Reset {
         static let base: UInt32 = 0x4000_C000
         static let doneOffset: UInt32 = 0x08
         static let systemPLL: UInt32 = 1 << 12
+        static let usbPLL: UInt32 = 1 << 13
+        static let usb: UInt32 = 1 << 24
         static let timer: UInt32 = 1 << 21
         static let uart0: UInt32 = 1 << 22
         static let uart1: UInt32 = 1 << 23
