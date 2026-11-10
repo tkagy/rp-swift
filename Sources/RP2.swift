@@ -84,18 +84,17 @@ enum RP2 {
         memory.initialize()
         clock.initialize()
         uart0 = UART(.uart0).initialize(tx: 0, rx: 1, baudRate: 115_200)
+        if uart0.status != .none { faultHandler() }
         main()
     }
 
     static func main() -> Never {
-        // UART test
-        for _ in 0..<100 {
-            uart0.write("Hello World\r\n")
+        uart0.write("Disable local echo, then type:\r\n")
+        while true {
+            if case let .byte(byte) = uart0.read() {
+                uart0.write(byte: byte)
+            }
         }
-        uart0.flush()
-
-        // Main loop
-        while true {}
     }
 
     // The vector table supplies the initial stack pointer: boot2 on RP2040,

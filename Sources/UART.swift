@@ -10,6 +10,8 @@
 // 9.11.3 Pad Control - User Bank; 7.5.3 Reset registers; 1.2.3 GPIO functions.
 // https://datasheets.raspberrypi.com/rp2350/rp2350-datasheet.pdf
 struct UART {
+    private typealias register = RP2.Register32
+
     enum ErrorCode: UInt32 {
         case none = 0
         case resetDidNotComplete = 1
@@ -42,49 +44,32 @@ struct UART {
             }
         }
 
-        var tx: Signal {
-            switch self {
-            case .uart0: Signal(gpio: [0, 12, 16, 28, 32, 44], gpioAux: [2, 14, 18, 30, 34, 46])
-            case .uart1: Signal(gpio: [4, 8, 20, 24, 36, 40], gpioAux: [6, 10, 22, 26, 38, 42])
-            }
-        }
-
-        var rx: Signal {
-            switch self {
-            case .uart0: Signal(gpio: [1, 13, 17, 29, 33, 45], gpioAux: [3, 15, 19, 31, 35, 47])
-            case .uart1: Signal(gpio: [5, 9, 21, 25, 37, 41], gpioAux: [7, 11, 23, 27, 39, 43])
-            }
+        struct Config {
+            let base: UInt32
+            let resetMask: UInt32
+            let tx: Signal
+            let rx: Signal
         }
     }
 
     private static let maxPollCount: UInt32 = 1_000_000
 
-    // Retain diagnostics per hardware port, even if initialize() never returns.
-    // Constant initial values need no heap allocation or lazy initialization.
-    private static var uart0Status: ErrorCode = .none
-    private static var uart1Status: ErrorCode = .none
-
-    // .none means no error; handles for the same port share its latest status.
-    private(set) var status: ErrorCode {
-        get { Self.status(for: port) }
-        nonmutating set {
-            switch port {
-            case .uart0: Self.uart0Status = newValue
-            case .uart1: Self.uart1Status = newValue
-            }
-        }
-    }
-
-    let port: Port
-    // No configuration is retained until initialize(tx:rx:baudRate:) succeeds.
+    private(set) var status: ErrorCode = .none
+    // No active pin or baud-rate configuration is retained until initialization succeeds.
     private(set) var transmitPin: UInt32? = nil
     private(set) var receivePin: UInt32? = nil
+    // Preserve each pin's pre-UART state across reinitialization.
+    private var transmitPinState: PinState? = nil
+    private var receivePinState: PinState? = nil
     // Requested baud rate; the hardware divider may introduce rounding error.
     private(set) var baudRate: UInt32? = nil
+    private let config: Port.Config
     private let regs: Registers
 
-    private var resetMask: UInt32 {
-        port == .uart0 ? Chip.Reset.uart0 : Chip.Reset.uart1
+    private struct PinState {
+        let pin: UInt32
+        let control: UInt32
+        let pad: UInt32
     }
 
     // Shared reset-register handles; the selected port supplies the UART reset bit.
@@ -92,14 +77,9 @@ struct UART {
     // RP2040  2.14: base 0x4000C000; UART0 bit 22, UART1 bit 23, IO_BANK0 bit 5, PADS_BANK0 bit 8.
     // RP2350 7.5.3: base 0x40020000; UART0 bit 26, UART1 bit 27, IO_BANK0 bit 6, PADS_BANK0 bit 9.
     // RESET offset 0x00 and RESET_DONE offset 0x08 are common to both chips.
-    private enum RESETS {
-        enum RESET {
-            static let reg = RP2.Register32(address: Chip.Reset.base)
-        }
-
-        enum RESET_DONE {
-            static let reg = RP2.Register32(address: Chip.Reset.base + 0x08)
-        }
+    private enum ResetRegisters {
+        static let reset = register(address: Chip.Reset.base)
+        static let resetDone = register(address: Chip.Reset.base + 0x08)
     }
 
     // RP2040 2.19.6.1 IO - User Bank
@@ -107,7 +87,7 @@ struct UART {
     //  Bases: RP2040 0x40014000; RP2350 0x40028000 (selected by Chip.GPIO.IOBank0.base).
     //  Both chips place GPIO n's CTRL at offset n*8+4.
     private enum IO_BANK0 {
-        static func control(_ pin: UInt32) -> RP2.Register32 {
+        static func control(_ pin: UInt32) -> register {
             .init(address: Chip.GPIO.IOBank0.base + pin * 8 + 4)
         }
     }
@@ -131,7 +111,7 @@ struct UART {
         static let transmit = inputEnabled | drive4mA | pullDown | schmittEnabled
         static let receive = inputEnabled | drive4mA | pullUp | schmittEnabled
 
-        static func gpio(_ pin: UInt32) -> RP2.Register32 {
+        static func gpio(_ pin: UInt32) -> register {
             .init(address: Chip.GPIO.PadsBank0.base + 4 + pin * 4)
         }
     }
@@ -160,16 +140,18 @@ struct UART {
         static let allInterrupts: UInt32 = (1 << 11) - 1
     }
 
+    private static let receiveErrorMask: UInt32 = 0xF << 8
+
     // Each UART instance retains handles for its selected port.
     private struct Registers {
-        let UARTDR: RP2.Register32
-        let UARTFR: RP2.Register32
-        let UARTIBRD: RP2.Register32
-        let UARTFBRD: RP2.Register32
-        let UARTLCR_H: RP2.Register32
-        let UARTCR: RP2.Register32
-        let UARTIMSC: RP2.Register32
-        let UARTICR: RP2.Register32
+        let UARTDR: register
+        let UARTFR: register
+        let UARTIBRD: register
+        let UARTFBRD: register
+        let UARTLCR_H: register
+        let UARTCR: register
+        let UARTIMSC: register
+        let UARTICR: register
 
         init(base: UInt32) {
             // Constructing handles does not access MMIO.
@@ -184,48 +166,105 @@ struct UART {
         }
     }
 
+    private func savedPinState(for pin: UInt32) -> PinState? {
+        if let state = transmitPinState, state.pin == pin { return state }
+        if let state = receivePinState, state.pin == pin { return state }
+        return nil
+    }
+
+    private func capturePinState(_ pin: UInt32) -> PinState {
+        PinState(
+            pin: pin,
+            control: IO_BANK0.control(pin).value,
+            pad: PADS_BANK0.gpio(pin).value
+        )
+    }
+
+    private func restorePinState(_ state: PinState) {
+        IO_BANK0.control(state.pin).value = state.control
+        PADS_BANK0.gpio(state.pin).value = state.pad
+    }
+
     // Construct register handles only; this does not configure hardware or GPIOs.
     init(_ port: Port) {
-        self.port = port
-        regs = Registers(base: port == .uart0 ? Chip.UART0.base : Chip.UART1.base)
+        let config: Port.Config
+        switch port {
+        case .uart0:
+            config = .init(
+                base: Chip.UART0.base,
+                resetMask: Chip.Reset.uart0,
+                tx: .init(gpio: [0, 12, 16, 28, 32, 44], gpioAux: [2, 14, 18, 30, 34, 46]),
+                rx: .init(gpio: [1, 13, 17, 29, 33, 45], gpioAux: [3, 15, 19, 31, 35, 47])
+            )
+        case .uart1:
+            config = .init(
+                base: Chip.UART1.base,
+                resetMask: Chip.Reset.uart1,
+                tx: .init(gpio: [4, 8, 20, 24, 36, 40], gpioAux: [6, 10, 22, 26, 38, 42]),
+                rx: .init(gpio: [5, 9, 21, 25, 37, 41], gpioAux: [7, 11, 23, 27, 39, 43])
+            )
+        }
+        self.config = config
+        regs = Registers(base: config.base)
     }
 
     /// Return a UART initialized with the selected TX/RX pins and baud rate. Store the
-    /// returned value to retain its configuration. Status is shared by all handles for the port.
-    /// Failures retain their cause in status(for:) before stopping in faultHandler().
+    /// returned handle to retain its status and configuration. Reinitializing it
+    /// restores pins no longer used to their states from before the first initialization.
     func initialize(tx: UInt32, rx: UInt32, baudRate: UInt32) -> Self {
         var uart = self
-        uart.configure(tx: tx, rx: rx, baudRate: baudRate)
+        uart.setup(tx: tx, rx: rx, baudRate: baudRate)
         return uart
     }
 
-    /// Inspect a port's latest initialization result, including failures before a handle is stored.
-    static func status(for port: Port) -> ErrorCode {
-        switch port {
-        case .uart0: uart0Status
-        case .uart1: uart1Status
+    enum ReadResult: Equatable {
+        case byte(UInt8)
+        case empty
+        case error(UInt32)
+    }
+
+    /// Check RX once without waiting; distinguish an empty FIFO from UART error flags.
+    func tryReadByte() -> ReadResult {
+        // RP2040 4.2.8 / RP2350 12.1.8: UARTFR.RXFE and UARTDR share this layout.
+        guard regs.UARTFR.value & UARTFR.receiveEmpty == 0 else { return .empty }
+        let received = regs.UARTDR.value
+        let errors = received & Self.receiveErrorMask
+        guard errors == 0 else { return .error(errors) }
+        return .byte(UInt8(truncatingIfNeeded: received))
+    }
+
+    /// Wait until a byte or receive error is available. Use tryReadByte to avoid waiting.
+    func read() -> ReadResult {
+        while true {
+            let result = tryReadByte()
+            if result != .empty { return result }
         }
     }
 
-    /// Read without waiting, or return nil if RX is empty. UARTDR bits [7:0]
-    /// contain data; [11:8] preserve overrun/break/parity/framing error flags.
-    // RP2040 4.2.8 / RP2350 12.1.8: UARTFR.RXFE and UARTDR have the same layout.
-    func read() -> UInt32? {
-        if regs.UARTFR.value & UARTFR.receiveEmpty != 0 { return nil }
-        return regs.UARTDR.value
-    }
-
-    /// Wait for the FIFO and shift register to finish transmitting (BUSY=0).
+    /// Wait without a timeout for the FIFO and shift register to finish transmitting (BUSY=0).
     // RP2040 4.2.8 / RP2350 12.1.8: UARTFR.BUSY includes the final stop bit.
     func flush() {
-        while regs.UARTFR.value & UARTFR.busy != 0 {}
+        while isTransmitting {}
     }
 
-    /// Enqueue a byte, waiting for FIFO space. flush() waits for wire completion.
+    /// True while the FIFO or shift register is still transmitting.
+    var isTransmitting: Bool {
+        regs.UARTFR.value & UARTFR.busy != 0
+    }
+
+    /// Enqueue one byte immediately if FIFO space is available.
+    /// Return false without writing when the FIFO is full.
+    @discardableResult
+    func tryWrite(byte: UInt8) -> Bool {
+        guard regs.UARTFR.value & UARTFR.transmitFull == 0 else { return false }
+        regs.UARTDR.value = UInt32(byte)
+        return true
+    }
+
+    /// Enqueue a byte, waiting without a timeout for FIFO space. Use tryWrite to avoid waiting.
     // RP2040 4.2.8 / RP2350 12.1.8: UARTFR.TXFF and UARTDR.DATA are shared.
     func write(byte: UInt8) {
-        while regs.UARTFR.value & UARTFR.transmitFull != 0 {}
-        regs.UARTDR.value = UInt32(byte)
+        while !tryWrite(byte: byte) {}
     }
 
     func write(_ text: StaticString) {
@@ -235,44 +274,55 @@ struct UART {
     }
 
     // Invalid pins and baud rates are rejected before any registers are written.
-    private mutating func configure(tx: UInt32, rx: UInt32, baudRate: UInt32) {
-        guard let transmitFuncsel = port.tx.funcsel(for: tx),
-              let receiveFuncsel = port.rx.funcsel(for: rx) else {
+    private mutating func setup(tx: UInt32, rx: UInt32, baudRate: UInt32) {
+        guard let transmitFuncsel = config.tx.funcsel(for: tx),
+              let receiveFuncsel = config.rx.funcsel(for: rx) else {
             status = .invalidPins
-            faultHandler()
+            return
         }
         // RP2040 4.2.3.1 / RP2350 12.1.3.1: UARTCLK / (16 * baud)
         // must be between 1 and 65535. Check the rate before dividing or adding it.
         guard baudRate > 0, baudRate <= Clock.peripheralFrequencyHz / 16 else {
             status = .invalidBaudRate
-            faultHandler()
+            return
         }
         // Rounded divisor in units of 1/64: round(clk_peri * 4 / baud).
         // UInt32 arithmetic fits the configured 12 MHz peripheral clock.
         let divisor = (Clock.peripheralFrequencyHz * 4 + baudRate / 2) / baudRate
         guard divisor >= 64, divisor <= 65_535 * 64 else {
             status = .invalidBaudRate
-            faultHandler()
+            return
         }
         status = .none
         // Reset only the selected UART. IO/pad banks are shared with other GPIO users;
         // release their reset if needed without resetting their existing settings.
-        let peripherals = resetMask | Chip.Reset.ioBank0 | Chip.Reset.padsBank0
-        RESETS.RESET.reg.setBits(resetMask)
-        RESETS.RESET.reg.clearBits(peripherals)
+        let peripherals = config.resetMask | Chip.Reset.ioBank0 | Chip.Reset.padsBank0
+        ResetRegisters.reset.setBits(config.resetMask)
+        ResetRegisters.reset.clearBits(peripherals)
         var resetReleased = false
         for _ in 0..<Self.maxPollCount {
-            if RESETS.RESET_DONE.reg.value & peripherals == peripherals {
+            if ResetRegisters.resetDone.value & peripherals == peripherals {
                 resetReleased = true
                 break
             }
         }
         guard resetReleased else {
             status = .resetDidNotComplete
-            faultHandler()
+            return
         }
 
+        // Reuse the original state for pins that stay assigned to this UART; capture
+        // the current state only when a pin is newly assigned.
+        let originalTransmitState = savedPinState(for: tx) ?? capturePinState(tx)
+        let originalReceiveState = savedPinState(for: rx) ?? capturePinState(rx)
         regs.UARTCR.value = 0
+        if let state = transmitPinState, state.pin != tx && state.pin != rx {
+            restorePinState(state)
+        }
+        if let state = receivePinState, state.pin != tx && state.pin != rx {
+            restorePinState(state)
+        }
+
         // RP2040 4.2 UART / RP2350 12.1 UART: same baud-rate generator formula.
         // At 12 MHz and 115200 baud: IBRD=6, FBRD=33, actual baud approximately 115108.
         regs.UARTIBRD.value = divisor / 64
@@ -290,6 +340,8 @@ struct UART {
 
         regs.UARTCR.value = UARTCR.enabled
             | UARTCR.transmitEnabled | UARTCR.receiveEnabled
+        transmitPinState = originalTransmitState
+        receivePinState = originalReceiveState
         transmitPin = tx
         receivePin = rx
         self.baudRate = baudRate
