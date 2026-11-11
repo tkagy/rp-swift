@@ -63,12 +63,16 @@ swiftc -target "$SWIFT_TARGET" \
     -emit-object "$PROJECT_DIR"/Sources/*.swift \
     -o "$SWIFT_OBJECT"
 
+MEMORY_OBJECT="$BUILD_DIR/Memory.o"
+clang -target "$SWIFT_TARGET" -D "$CHIP" -c \
+    "$PROJECT_DIR/Sources/Memory.S" -o "$MEMORY_OBJECT"
+
 if [[ "$MODE" == --object-only ]]; then
     printf 'Compiled %s (%s)\n' "$SWIFT_OBJECT" "$SWIFT_TARGET"
     exit 0
 fi
 
-LINK_OBJECTS=("$SWIFT_OBJECT")
+LINK_OBJECTS=("$SWIFT_OBJECT" "$MEMORY_OBJECT")
 if [[ "$CHIP" == RP2040 ]]; then
     # Download the W25Q080 boot2 with SPI clock divisor 2 from rp-rs v0.3.0.
     # Upstream: https://github.com/rp-rs/rp2040-boot2/tree/v0.3.0

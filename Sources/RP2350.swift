@@ -41,40 +41,23 @@ enum RP2350 {
     }
 
     enum GPIO {
-        enum IOBank0 {
+        // RP2350A (QFN60), GPIO0...29. Common pin information is in GPIO.swift.
+        enum IO_BANK0 {
             static let base: UInt32 = 0x4002_8000
         }
 
-        enum PadsBank0 {
+        enum PADS_BANK0 {
             static let base: UInt32 = 0x4003_8000
         }
 
-        static let pinCount: UInt32 = 48
-        static let uartFuncsel: UInt32 = 2
-        static let uartAuxFuncsel: UInt32 = 11
 
-        // QFN = Quad Flat No-lead: a package with underside contacts and no protruding leads.
-        // QFN60 has 60 terminals; RP2350A exposes 30 GPIOs on the chip.
-        // The terminal count is not the GPIO count or the number exposed on the board headers.
-        private static let qfn60PinCount: UInt32 = 30
-
-        // SYSINFO.PACKAGE_SEL: fixed-address package identification register.
-        private enum SYSINFO {
-            enum PACKAGE_SEL {
-                static let reg = RP2.Register32(address: RP2350.SystemInfo.base + 0x04)
-                // Bit 0: 0 = QFN80 (B), 1 = QFN60 (A).
-                static let packageMask: UInt32 = 1 << 0
-                static let qfn80: UInt32 = 0
-            }
-        }
-
-        static func isAvailable(_ pin: UInt32) -> Bool {
-            if pin < qfn60PinCount { return true }
-            guard pin < pinCount else { return false }
-            // GPIO30...47 are only bonded out on the B package.
-            return SYSINFO.PACKAGE_SEL.reg.value & SYSINFO.PACKAGE_SEL.packageMask
-                == SYSINFO.PACKAGE_SEL.qfn80
-        }
+        // RP2350A Table 3: additional UART routes, encoded as GPIO-number masks.
+        static let uartAuxFuncsel: UInt32? = 11
+        static let uart0TXAuxPins: UInt32 = (1 << 2) | (1 << 14) | (1 << 18)
+        static let uart0RXAuxPins: UInt32 = (1 << 3) | (1 << 15) | (1 << 19)
+        static let uart1TXAuxPins: UInt32 = (1 << 6) | (1 << 10) | (1 << 22) | (1 << 26)
+        static let uart1RXAuxPins: UInt32 = (1 << 7) | (1 << 11) | (1 << 23) | (1 << 27)
+        // TBD: PIO and other RP2350-specific peripheral functions.
     }
 
     enum UART0 {

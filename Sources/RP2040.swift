@@ -37,20 +37,21 @@ enum RP2040 {
     }
 
     enum GPIO {
-        enum IOBank0 {
+        enum IO_BANK0 {
             static let base: UInt32 = 0x4001_4000
         }
 
-        enum PadsBank0 {
+        enum PADS_BANK0 {
             static let base: UInt32 = 0x4001_C000
         }
 
-        static let pinCount: UInt32 = 30
-        static let uartFuncsel: UInt32 = 2
 
-        static func isAvailable(_ pin: UInt32) -> Bool {
-            pin < pinCount
-        }
+        // This chip has no auxiliary UART routes.
+        static let uartAuxFuncsel: UInt32? = nil
+        static let uart0TXAuxPins: UInt32 = 0
+        static let uart0RXAuxPins: UInt32 = 0
+        static let uart1TXAuxPins: UInt32 = 0
+        static let uart1RXAuxPins: UInt32 = 0
     }
 
     enum UART0 {

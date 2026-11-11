@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: MIT
 
 #if RP2040 && RP2350
-#error("Choose exactly one target: RP2040 or RP2350")
+    #error("Choose exactly one target: RP2040 or RP2350")
 #elseif RP2040
-typealias Chip = RP2040
+    typealias Chip = RP2040
 #elseif RP2350
-typealias Chip = RP2350
-#else
-#error("Pass -D RP2040 or -D RP2350 when building")
+    typealias Chip = RP2350
+#elseif !RP2040 && !RP2350
+    #error("Pass -D RP2040 or -D RP2350 when building")
 #endif
 
 /// Common firmware entry point for RP-series chips.
@@ -68,22 +68,47 @@ enum RP2 {
         }
     }
 
+    // Shared peripheral reset control. Chip.Reset supplies addresses and reset masks.
+    // RESET (0x00) and RESET_DONE (0x08) have the same offsets on both chips.
+    // Calls that change reset state must be serialized by the caller.
+    enum RESETS {
+        private static let RESET = Register(address: Chip.Reset.base)
+        private static let RESET_DONE = Register(address: Chip.Reset.base + 0x08)
+        private static let maxRetryCount: UInt32 = 1_000_000
+
+        // Release without disturbing the configuration of peripherals already running.
+        static func release(_ mask: UInt32) -> Bool {
+            if RESET.value & mask == 0, RESET_DONE.value & mask == mask { return true }
+            RESET.clearBits(mask)
+            for _ in 0..<maxRetryCount {
+                if RESET_DONE.value & mask == mask { return true }
+            }
+            return false
+        }
+
+        // Reset the selected peripherals, then release and wait for completion.
+        static func reset(_ mask: UInt32) -> Bool {
+            RESET.setBits(mask)
+            return release(mask)
+        }
+    }
+
     // Return the type directly, without lazy static storage before RAM is initialized.
     static var memory: Memory.Type { Memory.self }
     static var clock: Clock.Type { Clock.self }
 
     // Create these explicitly during initialize(), after RAM and clocks are ready.
     // nil is a constant initial value and requires no lazy initializer or atomic helpers.
-    // Use initialize(tx:rx:baudRate:) to configure pins only for a UART the application uses.
+    // Use open(tx:rx:baudRate:) to configure pins only for a UART the application uses.
     static var uart0: UART! = nil
-    static var uart1: UART! = nil
 
     // Run once at startup: RAM must be ready before stored peripheral state is used,
     // and the peripheral clock must be ready before either UART is initialized.
     static func initialize() -> Never {
         memory.initialize()
         clock.initialize()
-        uart0 = UART(.uart0).initialize(tx: 0, rx: 1, baudRate: 115_200)
+        uart0 = UART(.uart0)
+        uart0.open(tx: 0, rx: 1, baudRate: 115_200)
         if uart0.status != .none { faultHandler() }
         main()
     }
