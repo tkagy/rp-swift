@@ -11,12 +11,13 @@
 // 9.11.3 Pad Control - User Bank; 7.5.3 Reset registers; 1.2.3 GPIO functions.
 // https://datasheets.raspberrypi.com/rp2350/rp2350-datasheet.pdf
 struct UART {
-    enum ErrorCode: UInt32 {
-        case none = 0
-        case resetDidNotComplete = 1
-        case invalidPins = 2
-        case invalidBaudRate = 3
-        case pinsInUse = 4
+    enum ErrorCode: Equatable {
+        case none
+        case gpio(GPIO.ErrorCode)
+        case resetDidNotComplete
+        case invalidPins
+        case invalidBaudRate
+        case pinsInUse
     }
 
     enum Port {
@@ -158,14 +159,14 @@ struct UART {
         // Acquired pins remain held on failure until the caller calls close().
         let txError = GPIO.open(tx, as: config.tx, pad: .init(PDE: true))
         guard txError == .none else {
-            status = Self.errorCode(from: txError)
+            status = .gpio(txError)
             return
         }
         transmitPin = tx
 
         let rxError = GPIO.open(rx, as: config.rx, pad: .init(PUE: true))
         guard rxError == .none else {
-            status = Self.errorCode(from: rxError)
+            status = .gpio(rxError)
             return
         }
         receivePin = rx
@@ -202,17 +203,19 @@ struct UART {
 
         status = .none
         if let tx = transmitPin {
-            if GPIO.close(tx) == .none {
+            let error = GPIO.close(tx)
+            if error == .none {
                 transmitPin = nil
             } else {
-                status = .resetDidNotComplete
+                status = .gpio(error)
             }
         }
         if let rx = receivePin {
-            if GPIO.close(rx) == .none {
+            let error = GPIO.close(rx)
+            if error == .none {
                 receivePin = nil
             } else {
-                status = .resetDidNotComplete
+                status = .gpio(error)
             }
         }
     }
@@ -268,15 +271,6 @@ struct UART {
         precondition(baudRate != nil, "UART must be open before writing")
         for index in 0..<text.utf8CodeUnitCount {
             write(byte: text.utf8Start[index])
-        }
-    }
-
-    private static func errorCode(from error: GPIO.ErrorCode) -> ErrorCode {
-        switch error {
-        case .none: return .none
-        case .invalidPin, .unsupportedFunction, .notImplemented: return .invalidPins
-        case .pinInUse: return .pinsInUse
-        case .resetDidNotComplete: return .resetDidNotComplete
         }
     }
 }

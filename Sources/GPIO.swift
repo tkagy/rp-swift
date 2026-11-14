@@ -22,7 +22,7 @@ enum GPIO {
     }
 
     enum DriveStrength: UInt32 { case mA2 = 0, mA4, mA8, mA12 }
-    enum ErrorCode {
+    enum ErrorCode: Equatable {
         case none, invalidPin, unsupportedFunction, notImplemented
         case pinInUse, resetDidNotComplete
     }
