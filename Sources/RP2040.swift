@@ -13,12 +13,8 @@ enum RP2040 {
         static let base: UInt32 = 0x4002_4000
     }
 
-    enum SystemPLL {
+    enum SysPLL {
         static let base: UInt32 = 0x4002_8000
-        static let referenceDivider: UInt32 = 1
-        static let feedbackDivider: UInt32 = 125
-        static let postDivider1: UInt32 = 6
-        static let postDivider2: UInt32 = 2
     }
 
     enum Clock {
@@ -29,7 +25,7 @@ enum RP2040 {
 
     enum Reset {
         static let base: UInt32 = 0x4000_C000
-        static let systemPLL: UInt32 = 1 << 12
+        static let sysPLL: UInt32 = 1 << 12
         static let uart0: UInt32 = 1 << 22
         static let uart1: UInt32 = 1 << 23
         static let ioBank0: UInt32 = 1 << 5

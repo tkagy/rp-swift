@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 /// UART0 or UART1 with explicit, pin-map-validated TX/RX GPIOs and baud rate, 8N1.
-/// Call Clock.initialize() before open().
+/// Call Clock.initialize(config:) before open().
 /// Reading, writing, and querying transmission require a successful open until close().
 // RP2040 datasheet: 4.2.8 UART registers; 2.19.6.1 IO - User Bank;
 // 2.19.6.3 Pad Control - User Bank; 2.14 Subsystem Resets; 1.4.3 GPIO Functions.
@@ -97,6 +97,11 @@ struct UART {
     // UARTDR[11:8]: OE (overrun), BE (break), PE (parity), FE (framing).
     private static let receiveErrorMask: UInt32 = 0xF << 8
 
+    private enum BaudRateDivisor {
+        static let fractionalScale: UInt32 = 1 << 6 // FBRD has 6 fractional bits.
+        static let maxInteger: UInt32 = 0xFFFF // IBRD is 16 bits.
+    }
+
     // Construct register handles only; this does not configure hardware or GPIOs.
     init(_ port: Port) {
         let config: Port.Config
@@ -132,16 +137,18 @@ struct UART {
             status = .invalidPins
             return
         }
+        let peripheralFreqHz = Clock.peripheralFreqMHz * 1_000_000
         // RP2040 4.2.3.1 / RP2350 12.1.3.1: UARTCLK / (16 * baud)
         // must be between 1 and 65535. Check the rate before dividing or adding it.
-        guard baudRate > 0, baudRate <= Clock.peripheralFrequencyHz / 16 else {
+        guard baudRate > 0, baudRate <= peripheralFreqHz / 16 else {
             status = .invalidBaudRate
             return
         }
-        // Rounded divisor in units of 1/64: round(clk_peri * 4 / baud).
+        // Round the divisor in 1/64 units: UARTCLK * 4 / baud.
         // UInt32 arithmetic fits the configured 12 MHz peripheral clock.
-        let divisor = (Clock.peripheralFrequencyHz * 4 + baudRate / 2) / baudRate
-        guard divisor <= 65_535 * 64 else {
+        let divisor = (peripheralFreqHz * 4 + baudRate / 2) / baudRate
+        let integerDivisor = divisor / BaudRateDivisor.fractionalScale
+        guard integerDivisor <= BaudRateDivisor.maxInteger else {
             status = .invalidBaudRate
             return
         }
@@ -173,8 +180,8 @@ struct UART {
 
         // RP2040 4.2 UART / RP2350 12.1 UART: same baud-rate generator formula.
         // At 12 MHz and 115200 baud: IBRD=6, FBRD=33, actual baud approximately 115108.
-        regs.UARTIBRD.value = divisor / 64
-        regs.UARTFBRD.value = divisor % 64
+        regs.UARTIBRD.value = integerDivisor
+        regs.UARTFBRD.value = divisor % BaudRateDivisor.fractionalScale
         // WLEN=3: eight bits; FEN=1: FIFO. PEN=0, STP2=0: no parity, one stop bit.
         regs.UARTLCR_H.value = UARTLCR_H.WLEN | UARTLCR_H.FEN
         regs.UARTIMSC.value = 0

@@ -14,6 +14,14 @@
 /// Common firmware entry point for RP-series chips.
 // @main is not required because resetHandler invokes main through reset().
 enum RP2 {
+    // Select the CPU clock used during startup.
+#if RP2040
+    static var sysFreqConfig: Clock.SysFreqConfig { .MHz125 }
+#endif
+#if RP2350
+    static var sysFreqConfig: Clock.SysFreqConfig { .MHz150 }
+#endif
+
     /// A 32-bit hardware register at a fixed address.
     // RP2040 datasheet, 2.2 "Address Map"; 2.1.2 "Atomic Register Access".
     // https://datasheets.raspberrypi.com/rp2040/rp2040-datasheet.pdf
@@ -72,15 +80,15 @@ enum RP2 {
     // RESET (0x00) and RESET_DONE (0x08) have the same offsets on both chips.
     // Calls that change reset state must be serialized by the caller.
     enum RESETS {
-        private static let RESET = Register(address: Chip.Reset.base)
-        private static let RESET_DONE = Register(address: Chip.Reset.base + 0x08)
-        private static let maxRetryCount: UInt32 = 1_000_000
+        private static let RESET = Register32(address: Chip.Reset.base)
+        private static let RESET_DONE = Register32(address: Chip.Reset.base + 0x08)
+        private static let maxPollCount: UInt32 = 1_000_000
 
         // Release without disturbing the configuration of peripherals already running.
         static func release(_ mask: UInt32) -> Bool {
             if RESET.value & mask == 0, RESET_DONE.value & mask == mask { return true }
             RESET.clearBits(mask)
-            for _ in 0..<maxRetryCount {
+            for _ in 0..<maxPollCount {
                 if RESET_DONE.value & mask == mask { return true }
             }
             return false
@@ -106,7 +114,7 @@ enum RP2 {
     // and the peripheral clock must be ready before either UART is initialized.
     static func initialize() -> Never {
         memory.initialize()
-        clock.initialize()
+        clock.initialize(config: sysFreqConfig)
         uart0 = UART(.uart0)
         uart0.open(tx: 0, rx: 1, baudRate: 115_200)
         if uart0.status != .none { faultHandler() }
