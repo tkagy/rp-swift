@@ -82,7 +82,10 @@ enum Clock {
 
     private static func initializeCrystal() -> ErrorCode {
         // Board-specific crystal stabilization allowance.
-        configureCrystalStartupDelay(ms: 7)
+        //      7ms -> UART didn't work after board reset
+        //     16ms -> It seems OK
+        //     64ms -> For safety delay
+        configureCrystalStartupDelay(ms: 64)
         XOSC.CTRL.reg.value = XOSC.CTRL.ENABLE | XOSC.CTRL.FREQ_RANGE
         guard waitFor(XOSC.STATUS.reg,
             mask: XOSC.STATUS.STABLE, value: XOSC.STATUS.STABLE
@@ -91,6 +94,8 @@ enum Clock {
     }
 
     // RP2040 2.16.3 "Startup Delay"; RP2350 8.2.4 "Startup delay".
+    //      "The 1 ms default is sufficient for the RP2 reference design"
+    //      "This time will be dependent on the chosen crystal"
     // STARTUP counts groups of 256 crystal cycles; round up the requested delay.
     @inline(__always)
     private static func configureCrystalStartupDelay(ms: UInt32) {
