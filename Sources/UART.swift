@@ -81,7 +81,6 @@ struct UART: ~Copyable {
         }
     }
 
-    private(set) var status: ErrorCode = .none
     // A pin is retained as soon as its GPIO open succeeds.
     private(set) var transmitPin: GPIO.Pin? = nil
     private(set) var receivePin: GPIO.Pin? = nil
@@ -147,45 +146,38 @@ struct UART: ~Copyable {
         regs = Registers(base: config.base)
     }
 
-    /// Acquire unused TX/RX pins and start the UART. Inspect status for errors.
+    /// Acquire unused TX/RX pins and start the UART. Returns the operation's error.
     /// Call close to release acquired pins, including after a failed open.
     /// Call close before changing pins or opening this UART again.
-    mutating func open(tx: GPIO.Pin, rx: GPIO.Pin, baudRate: UInt32) {
+    mutating func open(tx: GPIO.Pin, rx: GPIO.Pin, baudRate: UInt32) -> ErrorCode {
         guard transmitPin == nil, receivePin == nil else {
-            status = .pinsInUse
-            return
+            return .pinsInUse
         }
         guard !port.inUse else {
-            status = .portInUse
-            return
+            return .portInUse
         }
         guard tx != rx else {
-            status = .invalidPins
-            return
+            return .invalidPins
         }
         let peripheralFreqHz = Clock.peripheralFreqMHz * 1_000_000
         // RP2040 4.2.3.1 / RP2350 12.1.3.1: UARTCLK / (16 * baud)
         // must be between 1 and 65535. Check the rate before dividing or adding it.
         guard baudRate > 0, baudRate <= peripheralFreqHz / 16 else {
-            status = .invalidBaudRate
-            return
+            return .invalidBaudRate
         }
         // Round the divisor in 1/64 units: UARTCLK * 4 / baud.
         // UInt32 arithmetic fits the configured 12 MHz peripheral clock.
         let divisor = (peripheralFreqHz * 4 + baudRate / 2) / baudRate
         let integerDivisor = divisor / BaudRateDivisor.fractionalScale
         guard integerDivisor <= BaudRateDivisor.maxInteger else {
-            status = .invalidBaudRate
-            return
+            return .invalidBaudRate
         }
-        status = .none
 
         // GPIO owns capability and usage validation.
         // Acquired pins remain held on failure until the caller calls close().
         let txError = GPIO.open(tx, as: config.tx, pad: .init(PDE: true))
         guard txError == .none else {
-            status = .gpio(txError)
-            return
+            return .gpio(txError)
         }
         transmitPin = tx
         // Retain the port with its first acquired pin, including on later failure.
@@ -193,15 +185,13 @@ struct UART: ~Copyable {
 
         let rxError = GPIO.open(rx, as: config.rx, pad: .init(PUE: true))
         guard rxError == .none else {
-            status = .gpio(rxError)
-            return
+            return .gpio(rxError)
         }
         receivePin = rx
 
         // GPIO manages the shared banks; reset only the selected UART here.
         guard RP2.RESETS.reset(config.resetMask) else {
-            status = .resetDidNotComplete
-            return
+            return .resetDidNotComplete
         }
 
         regs.UARTCR.value = 0
@@ -218,10 +208,11 @@ struct UART: ~Copyable {
         regs.UARTCR.value = UARTCR.UARTEN
             | UARTCR.TXE | UARTCR.RXE
         self.baudRate = baudRate
+        return .none
     }
 
-    /// Drain TX, stop the UART, and release its acquired pins. Inspect status for errors.
-    mutating func close() {
+    /// Drain TX, stop the UART, and release its acquired pins. Returns the first release error.
+    mutating func close() -> ErrorCode {
         let hadPins = transmitPin != nil || receivePin != nil
         if baudRate != nil {
             flush()
@@ -229,26 +220,27 @@ struct UART: ~Copyable {
             baudRate = nil
         }
 
-        status = .none
+        var error: ErrorCode = .none
         if let tx = transmitPin {
-            let error = GPIO.close(tx)
-            if error == .none {
+            let pinError = GPIO.close(tx)
+            if pinError == .none {
                 transmitPin = nil
-            } else {
-                status = .gpio(error)
+            } else if error == .none {
+                error = .gpio(pinError)
             }
         }
         if let rx = receivePin {
-            let error = GPIO.close(rx)
-            if error == .none {
+            let pinError = GPIO.close(rx)
+            if pinError == .none {
                 receivePin = nil
-            } else {
-                status = .gpio(error)
+            } else if error == .none {
+                error = .gpio(pinError)
             }
         }
         if hadPins, transmitPin == nil, receivePin == nil {
             port.inUse = false
         }
+        return error
     }
 
     /// Check RX once without waiting; distinguish an empty FIFO from UART error flags.

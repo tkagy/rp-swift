@@ -241,7 +241,6 @@ enum GPIO {
     }
     static func isValidPin(_ number: UInt32) -> Bool { Pin(rawValue: number) != nil }
 
-    @discardableResult
     static func open(_ pin: Pin, as function: Function,
                      pad: PadConfig = PadConfig()) -> ErrorCode {
         let number = pin.number
@@ -274,7 +273,6 @@ enum GPIO {
     }
 
     // Stop the peripheral before closing its pins; closing disables digital input/output.
-    @discardableResult
     static func close(_ pin: Pin) -> ErrorCode {
         let number = pin.number
         guard currentFunctions[Int(number)] != .none else { return .none }

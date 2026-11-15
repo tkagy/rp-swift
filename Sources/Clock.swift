@@ -54,30 +54,31 @@ enum Clock {
     // .none means no error; other cases identify a failure in this module.
     private(set) static var status: ErrorCode = .none
 
-    // Initialization failures are fatal; retain the cause for debugger inspection.
-    static func initialize(config: SysFreqConfig) {
+    // Retain the latest failure for debugger inspection; the caller decides whether it is fatal.
+    static func initialize(config: SysFreqConfig) -> ErrorCode {
         status = .none
         CLOCKS.CLK_SYS_RESUS_CTRL.reg.value = 0
 
         status = initializeCrystal()
-        guard status == .none else { faultHandler() }
+        guard status == .none else { return status }
 
         status = initializeReferenceClock()
-        guard status == .none else { faultHandler() }
+        guard status == .none else { return status }
 
         status = stopPeripheralClock()
-        guard status == .none else { faultHandler() }
+        guard status == .none else { return status }
 
         status = initializeSysPLL(config: config)
-        guard status == .none else { faultHandler() }
+        guard status == .none else { return status }
 
         CLOCKS.CLK_SYS_DIV.reg.value = config.clkSysDivInt
             << Chip.Clock.dividerIntegerShift
 
         status = switchSysClockToPLL()
-        guard status == .none else { faultHandler() }
+        guard status == .none else { return status }
 
         initializePeripheralClock()
+        return .none
     }
 
     private static func initializeCrystal() -> ErrorCode {

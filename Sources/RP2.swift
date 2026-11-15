@@ -113,9 +113,10 @@ enum RP2 {
     // and the peripheral clock must be ready before either UART is initialized.
     static func initialize() -> Never {
         memory.initialize()
-        clock.initialize(config: sysFreqConfig)
-        uart0.open(tx: .gpio0, rx: .gpio1, baudRate: 115_200)
-        if uart0.status != .none { faultHandler() }
+        guard clock.initialize(config: sysFreqConfig) == .none else { faultHandler() }
+        guard uart0.open(tx: .gpio0, rx: .gpio1, baudRate: 115_200) == .none else {
+            faultHandler()
+        }
         main()
     }
 
