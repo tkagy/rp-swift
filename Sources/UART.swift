@@ -4,13 +4,15 @@
 /// UART0 or UART1 with explicit, pin-map-validated TX/RX GPIOs and baud rate, 8N1.
 /// Call Clock.initialize(config:) before open().
 /// Reading, writing, and querying transmission require a successful open until close().
+/// Calls to open and close across all instances must be serialized by the caller.
+/// Ownership can be moved, but not copied. Call close before discarding an acquired UART.
 // RP2040 datasheet: 4.2.8 UART registers; 2.19.6.1 IO - User Bank;
 // 2.19.6.3 Pad Control - User Bank; 2.14 Subsystem Resets; 1.4.3 GPIO Functions.
 // https://datasheets.raspberrypi.com/rp2040/rp2040-datasheet.pdf
 // RP2350 datasheet: 12.1.8 UART registers; 9.11.1 IO - User Bank;
 // 9.11.3 Pad Control - User Bank; 7.5.3 Reset registers; 1.2.3 GPIO functions.
 // https://datasheets.raspberrypi.com/rp2350/rp2350-datasheet.pdf
-struct UART {
+struct UART: ~Copyable {
     enum ErrorCode: Equatable {
         case none
         case gpio(GPIO.ErrorCode)
@@ -18,11 +20,28 @@ struct UART {
         case invalidPins
         case invalidBaudRate
         case pinsInUse
+        case portInUse
     }
 
-    enum Port {
+    enum Port: UInt32 {
         case uart0
         case uart1
+
+        // Bit 0 tracks UART0; bit 1 tracks UART1 (rawValue).
+        private static var usedPorts: UInt32 = 0
+
+        private var mask: UInt32 { 1 << rawValue }
+
+        fileprivate var inUse: Bool {
+            get { Self.usedPorts & mask != 0 }
+            nonmutating set {
+                if newValue {
+                    Self.usedPorts |= mask
+                } else {
+                    Self.usedPorts &= ~mask
+                }
+            }
+        }
 
         struct Config {
             let base: UInt32
@@ -68,6 +87,7 @@ struct UART {
     private(set) var receivePin: UInt32? = nil
     // Requested baud rate; the hardware divider may introduce rounding error.
     private(set) var baudRate: UInt32? = nil
+    private let port: Port
     private let config: Port.Config
     private let regs: Registers
 
@@ -123,6 +143,7 @@ struct UART {
             )
         }
         self.config = config
+        self.port = port
         regs = Registers(base: config.base)
     }
 
@@ -132,6 +153,10 @@ struct UART {
     mutating func open(tx: UInt32, rx: UInt32, baudRate: UInt32) {
         guard transmitPin == nil, receivePin == nil else {
             status = .pinsInUse
+            return
+        }
+        guard !port.inUse else {
+            status = .portInUse
             return
         }
         guard tx != rx else {
@@ -163,6 +188,8 @@ struct UART {
             return
         }
         transmitPin = tx
+        // Retain the port with its first acquired pin, including on later failure.
+        port.inUse = true
 
         let rxError = GPIO.open(rx, as: config.rx, pad: .init(PUE: true))
         guard rxError == .none else {
@@ -195,6 +222,7 @@ struct UART {
 
     /// Drain TX, stop the UART, and release its acquired pins. Inspect status for errors.
     mutating func close() {
+        let hadPins = transmitPin != nil || receivePin != nil
         if baudRate != nil {
             flush()
             regs.UARTCR.value = 0
@@ -217,6 +245,9 @@ struct UART {
             } else {
                 status = .gpio(error)
             }
+        }
+        if hadPins, transmitPin == nil, receivePin == nil {
+            port.inUse = false
         }
     }
 

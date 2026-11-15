@@ -8,20 +8,19 @@
 #error "Choose exactly one assembly target: RP2040 or RP2350"
 #endif
 
+#if RP2040
 // Compiler atomic ABI for aligned 32-bit normal RAM, used by Embedded Swift's
 // once-only initialization. All requested orders are conservatively implemented
-// as sequentially consistent. These entries do not make Console reentrant.
+// as sequentially consistent.
 // No NMI/HardFault use: those handlers cannot be masked by PRIMASK. A Swift
 // initializer must also not be reentered from an IRQ while its once token is busy.
 // ABI: load(ptr, order); store(ptr, value, order);
 // compare_exchange(ptr, expectedPtr, desired, successOrder, failureOrder).
 // The compare_exchange runtime entry has no 'weak' argument; failure updates
 // *expectedPtr and returns false. It never fails spuriously.
-#if RP2040
 // Use the highest-index lock so application locks remain the contiguous range
-// 0...30. Index 31 has no hardware-special behavior. Keep in sync with
-// SIO.runtimeReservedSpinlocks; applications and SIO.initialize must not claim
-// or release this runtime-owned lock. RP2350 uses CPU exclusives instead.
+// 0...30. Index 31 has no hardware-special behavior. Applications must not
+// claim or release this runtime-owned lock.
 .equ MEMORY_ATOMIC_SIO_BASE,          0xD0000000
 .equ MEMORY_ATOMIC_SPINLOCK_OFFSET,   0x100
 .equ MEMORY_ATOMIC_SPINLOCK_INDEX,    31
@@ -56,7 +55,6 @@
     pop {r4, r5, r6, r7}
     bx lr
 .endm
-#endif
 
 // Function: __atomic_load_4. Returns the loaded word in r0.
 .section .text.__atomic_load_4,"ax",%progbits
@@ -65,16 +63,9 @@
 .type __atomic_load_4,%function
 .thumb_func
 __atomic_load_4:
-#if RP2040
     memory_atomic_enter
     ldr r0, [r4]
     memory_atomic_leave
-#elif RP2350
-    dmb sy
-    ldr r0, [r0]
-    dmb sy
-    bx lr
-#endif
 .size __atomic_load_4, .-__atomic_load_4
 // End function: __atomic_load_4.
 .ltorg
@@ -86,18 +77,35 @@ __atomic_load_4:
 .type __atomic_store_4,%function
 .thumb_func
 __atomic_store_4:
-#if RP2040
     memory_atomic_enter
     str r5, [r4]
     memory_atomic_leave
-#elif RP2350
-    dmb sy
-    str r1, [r0]
-    dmb sy
-    bx lr
-#endif
 .size __atomic_store_4, .-__atomic_store_4
 // End function: __atomic_store_4.
+.ltorg
+
+// Function: __atomic_compare_exchange_4. Return whether desired was stored.
+// On mismatch, copy the current word into *expectedPtr.
+.section .text.__atomic_compare_exchange_4,"ax",%progbits
+.p2align 2
+.global __atomic_compare_exchange_4
+.type __atomic_compare_exchange_4,%function
+.thumb_func
+__atomic_compare_exchange_4:
+    memory_atomic_enter
+    ldr r0, [r4]
+    ldr r1, [r5]
+    cmp r0, r1
+    bne 1f
+    str r6, [r4]
+    movs r0, #1
+    b 2f
+1:
+    str r0, [r5]
+    movs r0, #0
+2:
+    memory_atomic_leave
+.size __atomic_compare_exchange_4, .-__atomic_compare_exchange_4
 .ltorg
 
 // Function: __atomic_fetch_sub_4(pointer, value, memory_order).
@@ -108,24 +116,12 @@ __atomic_store_4:
 .type __atomic_fetch_sub_4,%function
 .thumb_func
 __atomic_fetch_sub_4:
-#if RP2040
     memory_atomic_enter
     ldr r0, [r4]
     subs r1, r0, r5
     str r1, [r4]
     memory_atomic_leave
-#elif RP2350
-    dmb sy
-1:
-    ldrex r2, [r0]
-    sub r3, r2, r1
-    strex r12, r3, [r0]
-    cmp r12, #0
-    bne 1b
-    mov r0, r2
-    dmb sy
-    bx lr
-#endif
 .size __atomic_fetch_sub_4, .-__atomic_fetch_sub_4
 // End function: __atomic_fetch_sub_4.
 .ltorg
+#endif

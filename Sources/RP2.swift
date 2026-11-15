@@ -105,17 +105,15 @@ enum RP2 {
     static var memory: Memory.Type { Memory.self }
     static var clock: Clock.Type { Clock.self }
 
-    // Create these explicitly during initialize(), after RAM and clocks are ready.
-    // nil is a constant initial value and requires no lazy initializer or atomic helpers.
-    // Use open(tx:rx:baudRate:) to configure pins only for a UART the application uses.
-    static var uart0: UART! = nil
+    // Access after RAM setup. Construction creates register handles only;
+    // open(tx:rx:baudRate:) configures the hardware after clocks are ready.
+    static var uart0 = UART(.uart0)
 
     // Run once at startup: RAM must be ready before stored peripheral state is used,
     // and the peripheral clock must be ready before either UART is initialized.
     static func initialize() -> Never {
         memory.initialize()
         clock.initialize(config: sysFreqConfig)
-        uart0 = UART(.uart0)
         uart0.open(tx: 0, rx: 1, baudRate: 115_200)
         if uart0.status != .none { faultHandler() }
         main()
