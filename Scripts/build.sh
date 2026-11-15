@@ -74,34 +74,18 @@ fi
 
 LINK_OBJECTS=("$SWIFT_OBJECT" "$MEMORY_OBJECT")
 if [[ "$CHIP" == RP2040 ]]; then
-    # Download the W25Q080 boot2 with SPI clock divisor 2 from rp-rs v0.3.0.
-    # Upstream: https://github.com/rp-rs/rp2040-boot2/tree/v0.3.0
-    # License: BSD-3-Clause. The binary is fetched at build time, not vendored here.
-    # Pin the commit so downloads are reproducible and the verifier checks a known blob.
-    BOOT2_COMMIT=b46a77eb4406c4d06837345bdad2f906d483b73f
-    # Keep the downloaded blob beside the RP2040 build intermediates only while needed.
-    BOOT2_DIR="$BUILD_DIR"
-    BOOT2_BIN="$BOOT2_DIR/boot2_w25q080.padded.bin"
-    BOOT2_URL="https://raw.githubusercontent.com/rp-rs/rp2040-boot2/$BOOT2_COMMIT/bin/boot2_w25q080.padded.bin"
-    mkdir -p "$BOOT2_DIR"
-    if [[ ! -f "$BOOT2_BIN" ]]; then
-        # Download to a temporary file; cache it only after validation succeeds.
-        BOOT2_TEMP=$(mktemp "$BOOT2_DIR/download.XXXXXX")
-        trap 'rm -f -- "$BOOT2_TEMP"' EXIT
-        curl --fail --location --connect-timeout 10 --max-time 60 \
-            "$BOOT2_URL" -o "$BOOT2_TEMP"
-        python3 "$PROJECT_DIR/Scripts/verify-boot2.py" "$BOOT2_TEMP"
-        mv -- "$BOOT2_TEMP" "$BOOT2_BIN"
-        trap - EXIT
-    else
-        python3 "$PROJECT_DIR/Scripts/verify-boot2.py" "$BOOT2_BIN"
-    fi
-    # Wrap the supplied binary as an ELF section for the linker; no assembly is needed.
-    llvm-objcopy -I binary -O elf32-littlearm -B arm \
-        --rename-section .data=.boot2,alloc,load,readonly,data,contents \
-        "$BOOT2_BIN" "$BUILD_DIR/boot2.o"
-    rm -f -- "$BOOT2_BIN"
-    LINK_OBJECTS+=("$BUILD_DIR/boot2.o")
+    # Assemble the self-written boot2, generate its checksum, then patch the
+    # section before linking it at the start of flash.
+    BOOT2_OBJECT="$BUILD_DIR/boot2.o"
+    BOOT2_RAW="$BUILD_DIR/boot2.raw.bin"
+    BOOT2_BIN="$BUILD_DIR/boot2.bin"
+    clang -target "$SWIFT_TARGET" -D "$CHIP" -c \
+        "$PROJECT_DIR/Sources/RP2.S" -o "$BOOT2_OBJECT"
+    llvm-objcopy --dump-section ".boot2=$BOOT2_RAW" "$BOOT2_OBJECT"
+    python3 "$PROJECT_DIR/Scripts/finalize-boot2.py" "$BOOT2_RAW" "$BOOT2_BIN"
+    llvm-objcopy --update-section ".boot2=$BOOT2_BIN" "$BOOT2_OBJECT"
+    rm -f -- "$BOOT2_RAW" "$BOOT2_BIN"
+    LINK_OBJECTS+=("$BOOT2_OBJECT")
 fi
 
 # The linker script supplies the chip-specific memory layout and boot metadata.

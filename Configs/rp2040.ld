@@ -48,7 +48,7 @@ STACK_RESERVED_BYTES = 4K;
 
 SECTIONS {
     /* The first 256 bytes are loaded by ROM. KEEP prevents garbage collection.
-       build.sh supplies a downloaded boot2 blob after checking its CRC. */
+       build.sh supplies the self-written boot2 after generating its CRC. */
     .boot2 ORIGIN(FLASH) : {
         KEEP(*(.boot2 .boot2.*))
     } > FLASH
