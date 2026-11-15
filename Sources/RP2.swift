@@ -102,6 +102,12 @@ enum RP2 {
     static func initialize() -> Never {
         memory.initialize()
         guard clock.initialize(config: sysFreqConfig) == .none else { faultHandler() }
+#if RP2040
+        // Boot2 starts XIP in standard 03h mode. Test faster modes from SRAM
+        // after clock setup.
+        let xipConfig = RP2040.SSI.Config(preset: .quadIO)
+        initializeXIP(config: xipConfig)
+#endif
         guard uart0.open(tx: .gpio0, rx: .gpio1, baudRate: 115_200) == .none else {
             faultHandler()
         }
@@ -129,6 +135,20 @@ enum RP2 {
     static func fault() -> Never {
         while true {}
     }
+
+#if RP2040
+    // Failed XIP verification must be handled before returning to Flash.
+    @_silgen_name("rp2_initialize_xip")
+    @inline(never)
+    // Keep the failure/stop path in the named SRAM section, without specialization.
+    @_optimize(none)
+    private static func initializeXIP(config: RP2040.SSI.Config) {
+        switch RP2040.SSI.setXIPmode(config: config) {
+        case .none: return
+        default: while true {}
+        }
+    }
+#endif
 }
 
 @_cdecl("rp2_reset")

@@ -50,7 +50,16 @@ esac
 BUILD_DIR="$PROJECT_DIR/.build/$CHIP"
 mkdir -p "$BUILD_DIR"
 
-# Compile both chips' firmware from the same sources with explicit chip selection.
+# Compile shared drivers with only the selected chip's implementation.
+SWIFT_SOURCES=()
+for SOURCE in "$PROJECT_DIR"/Sources/*.swift; do
+    case "${SOURCE##*/}" in
+        RP2040.swift|RP2350.swift)
+            if [[ "${SOURCE##*/}" != "$CHIP.swift" ]]; then continue; fi
+            ;;
+    esac
+    SWIFT_SOURCES+=("$SOURCE")
+done
 SWIFT_OBJECT="$BUILD_DIR/RP2.o"
 swiftc -target "$SWIFT_TARGET" \
     -D "$CHIP" \
@@ -60,7 +69,7 @@ swiftc -target "$SWIFT_TARGET" \
     -wmo -Osize -parse-as-library \
     -Xfrontend -function-sections \
     -Xfrontend -disable-stack-protector \
-    -emit-object "$PROJECT_DIR"/Sources/*.swift \
+    -emit-object "${SWIFT_SOURCES[@]}" \
     -o "$SWIFT_OBJECT"
 
 MEMORY_OBJECT="$BUILD_DIR/Memory.o"

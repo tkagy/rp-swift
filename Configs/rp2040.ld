@@ -89,6 +89,9 @@ SECTIONS {
     .ramfunc : ALIGN(4) {
         __ramfunc_start = .;
         KEEP(*(.ramfunc .ramfunc.*))
+        KEEP(*(.text.rp2040_ssi_config))
+        KEEP(*(.text.rp2040_ssi_verify_read_mode))
+        KEEP(*(.text.rp2_initialize_xip))
         KEEP(*(.text.memory_volatile_load32 .text.memory_volatile_store32))
         . = ALIGN(4);
         __ramfunc_end = .;
@@ -104,6 +107,10 @@ SECTIONS {
 
     /* ARM EHABI unwind index; separate from RP-specific boot metadata. */
     .ARM.exidx : { *(.ARM.exidx*) } > FLASH
+
+    /* Static linking resolves these read-only data relocations before flashing.
+       Keep Swift constant arrays and their pointer tables out of RAM. */
+    .data.rel.ro : ALIGN(4) { *(.data.rel.ro .data.rel.ro.*) } > FLASH
 
     /* The Global Offset Table (GOT) contains addresses used by Swift to find
        external symbols. Static linking fixes these addresses, so keep the table
@@ -137,13 +144,24 @@ SECTIONS {
     ASSERT(__bss_end <= STACK_TOP - STACK_RESERVED_BYTES,
            "RAM globals overlap the reserved 4 KiB stack")
     ASSERT(__ramfunc_end > __ramfunc_start,
-           "RP2040 RAM access routines must be linked into RAM")
+           "RP2040 SSI configuration helper must be linked into RAM")
+    ASSERT(rp2040_ssi_config >= ORIGIN(RAM) &&
+           rp2040_ssi_config < ORIGIN(RAM) + LENGTH(RAM),
+           "RP2040 SSI configuration entry point must execute from RAM")
+    ASSERT(rp2040_ssi_verify_read_mode >= __ramfunc_start &&
+           rp2040_ssi_verify_read_mode < __ramfunc_end,
+           "RP2040 SSI read verification must execute from RAM")
+    ASSERT(rp2_initialize_xip >= __ramfunc_start &&
+           rp2_initialize_xip < __ramfunc_end,
+           "RP2040 XIP initialization must execute from RAM")
     ASSERT(memory_volatile_load32 >= ORIGIN(RAM) &&
            memory_volatile_load32 < ORIGIN(RAM) + LENGTH(RAM),
            "RP2040 volatile load must execute from RAM")
     ASSERT(memory_volatile_store32 >= ORIGIN(RAM) &&
            memory_volatile_store32 < ORIGIN(RAM) + LENGTH(RAM),
            "RP2040 volatile store must execute from RAM")
+    ASSERT(rp2040_xip_probe_magic == ORIGIN(FLASH) + 248,
+           "RP2040 XIP probe magic must stay at flash offset 248")
 
     /* Check boot2 size here; Scripts/finalize-boot2.py generates its CRC. */
     ASSERT(SIZEOF(.boot2) == BOOT2_BYTES,

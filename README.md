@@ -5,52 +5,83 @@ SPDX-License-Identifier: MIT
 
 # Firmware for RP2040 / RP2350
 
-This firmware is written in Swift.
+Firmware for RP2040 (Arm Cortex-M0+) and RP2350 (Arm Cortex-M33),
+written primarily in Embedded Swift.
 
 ## Design Concepts
 
 - Organize each chip's peripherals and registers using enums and structs.
 - Use Embedded Swift and direct register access for firmware logic.
+- Use assembly for startup, volatile memory access, and RP2040 atomic operations
+  that require explicit CPU instructions.
 
 ## Requirements
 
-- Embedded Swift 6.x
+- `Swift` 6
+    + Requires Embedded Swift and `Extern` support.
+    + Compiles Swift sources for the target microcontroller, including references to assembly symbols.
+- `clang`
+    + Requires Arm target support.
+    + Assembles startup and memory access code.
 - `ld.lld`
-    + Creates an ELF firmware image from compiled code.
+    + Requires Arm target support.
+    + Links object files using the chip's memory layout to produce the ELF firmware image.
 - `picotool`
-    + Converts ELF firmware images to UF2.
-
----
-
-- Additional requirements for RP2040
-    + boot2
-        * Initializes flash access before the Swift firmware starts.
-        * [rp-rs/rp2040-boot2 v0.3.0](https://github.com/rp-rs/rp2040-boot2/tree/v0.3.0), BSD-3-Clause
-    + `curl`
-        * Downloads boot2 during the build.
-    + `llvm-objcopy`
-        * Wraps the boot2 binary in a linkable object file.
-    + Python 3.x with the following standard library modules:
-        * `pathlib`
-        * `struct`
-        * `sys`
+    + Requires `uf2 convert` support.
+    + Converts the ELF image to UF2 for USB flashing.
+- `llvm-objcopy` (only for RP2040)
+    + Extracts and updates binary sections in object files.
+- `Python` 3 (only for RP2040)
+    + Uses the standard library only.
+    + Finalizes startup data and calculates its checksum.
+- `OpenOCD` (only for SWD flashing)
+    + Requires support for the target chip and your debug probe.
+    + Writes the ELF image to flash through SWD.
 
 ## How to Build
 
 Run the build script from this directory:
 
 ```sh
-Scripts/build.sh           # Both chips
-Scripts/build.sh RP2040    # RP2040 only
-Scripts/build.sh RP2350    # RP2350 only
+bash Scripts/build.sh           # Both chips
+bash Scripts/build.sh RP2040    # RP2040 only
+bash Scripts/build.sh RP2350    # RP2350 only
 ```
 
 ## Build Outputs
 
-- `.build/RP2350/RP2.elf`
-- `.build/RP2350/RP2.uf2`
-- `.build/RP2040/RP2.elf`
-- `.build/RP2040/RP2.uf2`
+Outputs are placed in `.build/RP2040/` or `.build/RP2350/`:
+
+- `RP2.elf`
+    + Firmware image with addresses and symbols, used for SWD flashing and debugging.
+- `RP2.uf2`
+    + Firmware image for USB flashing in `BOOTSEL` mode.
+- `RP2.map`
+    + Linker report showing the addresses and sizes of functions and data.
+    + Used to inspect memory placement and usage; not needed for flashing.
+
+## How to Run
+
+### USB (`BOOTSEL`) for deployment
+
+1. Enter `BOOTSEL` mode after connecting your board to your host computer.
+2. Copy `RP2.uf2` matching your board's chip to the board's USB drive.
+3. Wait for the board to automatically reboot and run the firmware.
+
+### SWD (`OpenOCD`) for development
+
+Connect the powered board's `SWDIO`, `SWCLK`, `RUN`, and `GND` pins
+to a debug probe, such as a Raspberry Pi.
+
+```sh
+# RP2040 (Arm Cortex-M0+)
+openocd -f $CFG_DIR/rp-swd-rp2040.cfg -f target/rp2040.cfg \
+    -c "program .build/RP2040/RP2.elf verify reset exit"
+
+# RP2350 (Arm Cortex-M33)
+openocd -f $CFG_DIR/rp-swd-rp2350.cfg -f target/rp2350.cfg \
+    -c "program .build/RP2350/RP2.elf verify reset exit"
+```
 
 ## License
 

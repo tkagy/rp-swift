@@ -10,7 +10,7 @@
 //
 // RP2040 ROM copies this 256-byte image to SRAM and enters with LR == 0.
 // Keep boot2 to the standard 03h read path so it can start with an unknown
-// SPI NOR device.
+// SPI NOR device. The application later probes faster XIP modes from SRAM.
 // Divider 4 is retained from the clock decision: it is conservative while the
 // boot ROM leaves clk_sys on ROSC, and yields clk_sys / 4 after clock setup.
 .equ RP2040_XIP_SSI_BASE,       0x18000000
@@ -24,7 +24,9 @@
 .equ RP2040_SSI_SPI_CTRLR0_READ_03H, 0x03000218
 .equ RP2040_FLASH_VECTOR_TABLE, 0x10000100
 .equ RP2040_VTOR,               0xe000ed08
+.equ RP2040_BOOT2_MAGIC_OFFSET, 248
 .equ RP2040_BOOT2_PAYLOAD_BYTES, 252
+.equ RP2040_XIP_PROBE_MAGIC,    0x07770777
 
 .section .boot2,"ax",%progbits
 .balign 4
@@ -63,6 +65,10 @@ rp2040_boot2:
     bx r0
 
 .ltorg
+.org RP2040_BOOT2_MAGIC_OFFSET, 0
+.global rp2040_xip_probe_magic
+rp2040_xip_probe_magic:
+    .word RP2040_XIP_PROBE_MAGIC
 .org RP2040_BOOT2_PAYLOAD_BYTES, 0
 .word 0 // Replaced with the RP2040 boot2 CRC32 by Scripts/finalize-boot2.py.
 .size rp2040_boot2, .-rp2040_boot2

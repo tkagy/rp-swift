@@ -159,15 +159,16 @@ struct UART: ~Copyable {
         guard tx != rx else {
             return .invalidPins
         }
-        let peripheralFreqHz = Clock.peripheralFreqMHz * 1_000_000
+        // Wrapping operators avoid checked-multiply runtime helpers unavailable on Cortex-M0+.
+        // The configured clock ceiling is 150 MHz, so these products do not wrap.
+        let peripheralFreqHz = Clock.peripheralFreqMHz &* 1_000_000
         // RP2040 4.2.3.1 / RP2350 12.1.3.1: UARTCLK / (16 * baud)
         // must be between 1 and 65535. Check the rate before dividing or adding it.
         guard baudRate > 0, baudRate <= peripheralFreqHz / 16 else {
             return .invalidBaudRate
         }
         // Round the divisor in 1/64 units: UARTCLK * 4 / baud.
-        // UInt32 arithmetic fits the configured 12 MHz peripheral clock.
-        let divisor = (peripheralFreqHz * 4 + baudRate / 2) / baudRate
+        let divisor = (peripheralFreqHz &* 4 &+ baudRate / 2) / baudRate
         let integerDivisor = divisor / BaudRateDivisor.fractionalScale
         guard integerDivisor <= BaudRateDivisor.maxInteger else {
             return .invalidBaudRate

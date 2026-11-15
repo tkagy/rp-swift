@@ -5,10 +5,9 @@
 // https://datasheets.raspberrypi.com/rp2040/rp2040-datasheet.pdf
 // RP2350 datasheet: 8.1 Clocks, 8.2 XOSC, 8.6 PLL.
 // https://datasheets.raspberrypi.com/rp2350/rp2350-datasheet.pdf
-// 12 MHz crystal -> CLK_REF; PLL_SYS -> 125 MHz (RP2040) or 150 MHz (RP2350);
-// XOSC -> 12 MHz CLK_PERI for UART.
+// 12 MHz XOSC -> CLK_REF; PLL_SYS -> CLK_SYS.
+// RP2040 CLK_PERI follows PLL_SYS; RP2350 CLK_PERI remains on XOSC.
 enum Clock {
-
     enum ErrorCode: UInt32 {
         case none = 0
         case crystalDidNotStabilize = 1
@@ -25,12 +24,19 @@ enum Clock {
         let postDiv1: UInt32
         let postDiv2: UInt32
         let clkSysDivInt: UInt32
+        let pllSysFreqMHz: UInt32
 
-        private init(fbDivInt: UInt32, postDiv1: UInt32, postDiv2: UInt32, clkSysDivInt: UInt32) {
+        private init(
+            fbDivInt: UInt32,
+            postDiv1: UInt32,
+            postDiv2: UInt32,
+            clkSysDivInt: UInt32
+        ) {
             self.fbDivInt = fbDivInt
             self.postDiv1 = postDiv1
             self.postDiv2 = postDiv2
             self.clkSysDivInt = clkSysDivInt
+            pllSysFreqMHz = Clock.crystalFreqMHz * fbDivInt / (postDiv1 * postDiv2)
         }
 
         static var MHz48: Self { Self(fbDivInt: 96, postDiv1: 6, postDiv2: 4, clkSysDivInt: 1) }
@@ -49,7 +55,9 @@ enum Clock {
 
     // The RP2040 and RP2350 reference designs use a 12 MHz crystal:
     // RP2040 datasheet 2.15.2.2; RP2350 datasheet 8.1.2.3.
-    static let peripheralFreqMHz: UInt32 = 12
+    static let crystalFreqMHz: UInt32 = 12
+    // Start at XOSC; RP2040 updates this when CLK_PERI switches to PLL_SYS.
+    private(set) static var peripheralFreqMHz: UInt32 = crystalFreqMHz
 
     // .none means no error; other cases identify a failure in this module.
     private(set) static var status: ErrorCode = .none
@@ -77,7 +85,7 @@ enum Clock {
         status = switchSysClockToPLL()
         guard status == .none else { return status }
 
-        initializePeripheralClock()
+        initializePeripheralClock(config: config)
         return .none
     }
 
@@ -86,8 +94,9 @@ enum Clock {
         //      7ms -> UART didn't work after board reset
         //     16ms -> It seems OK
         //     64ms -> For safety delay
+        XOSC.CTRL.reg.value = XOSC.CTRL.FREQ_RANGE
         configureCrystalStartupDelay(ms: 64)
-        XOSC.CTRL.reg.value = XOSC.CTRL.ENABLE | XOSC.CTRL.FREQ_RANGE
+        XOSC.CTRL.reg.setBits(XOSC.CTRL.ENABLE)
         guard waitFor(XOSC.STATUS.reg,
             mask: XOSC.STATUS.STABLE, value: XOSC.STATUS.STABLE
         ) else { return .crystalDidNotStabilize }
@@ -102,7 +111,7 @@ enum Clock {
     private static func configureCrystalStartupDelay(ms: UInt32) {
         let msPerSec: UInt64 = 1_000
         let hzPerMhz: UInt64 = 1_000_000
-        let cycles = UInt64(peripheralFreqMHz) * UInt64(ms) * hzPerMhz / msPerSec
+        let cycles = UInt64(crystalFreqMHz) * UInt64(ms) * hzPerMhz / msPerSec
         let cyclesPerCount = XOSC.STARTUP.cyclesPerCount
         let startupDelayCount = (cycles + cyclesPerCount - 1) / cyclesPerCount
         precondition(startupDelayCount <= XOSC.STARTUP.maxDelayCount, "XOSC delay out of range")
@@ -147,7 +156,7 @@ enum Clock {
         let peripheralClockStopWaitCycles: UInt64 = 4
         let scaledWaitCycles = maxClkPeriFreqMHz * peripheralClockStopWaitCycles
         let readCount =
-            (scaledWaitCycles + UInt64(peripheralFreqMHz) - 1) / UInt64(peripheralFreqMHz)
+            (scaledWaitCycles + UInt64(crystalFreqMHz) - 1) / UInt64(crystalFreqMHz)
         for _ in 0..<readCount {
             _ = CLOCKS.CLK_PERI_CTRL.reg.value
         }
@@ -155,13 +164,19 @@ enum Clock {
 #endif
     }
 
-    private static func initializePeripheralClock() {
+    private static func initializePeripheralClock(config: SysFreqConfig) {
 #if RP2350
         CLOCKS.CLK_PERI_DIV.reg.value = CLOCKS.divideByOne
+        let source = CLOCKS.CLK_PERI_CTRL.AUXSRC_XOSC
 #endif
-        CLOCKS.CLK_PERI_CTRL.reg.value = CLOCKS.CLK_PERI_CTRL.AUXSRC_XOSC // Still stopped.
+#if RP2040
+        // RP2040 SSI and UART use clk_peri. Match the SDK startup clock source.
+        let source = CLOCKS.CLK_PERI_CTRL.AUXSRC_PLL_SYS
+        peripheralFreqMHz = config.pllSysFreqMHz
+#endif
+        CLOCKS.CLK_PERI_CTRL.reg.value = source // Still stopped.
         CLOCKS.CLK_PERI_CTRL.reg.value =
-            CLOCKS.CLK_PERI_CTRL.ENABLE | CLOCKS.CLK_PERI_CTRL.AUXSRC_XOSC
+            CLOCKS.CLK_PERI_CTRL.ENABLE | source
     }
 
     // RP2040 2.18 PLL; RP2350 8.6 PLL. Register offsets/field layout are shared.
@@ -247,6 +262,9 @@ enum Clock {
             static let ENABLE: UInt32 = 1 << 11 // Peripheral clock enable.
 #if RP2350
             static let ENABLED: UInt32 = 1 << 28 // Clock generator is enabled.
+#endif
+#if RP2040
+            static let AUXSRC_PLL_SYS: UInt32 = 0b001 << 5 // Select PLL_SYS for CLK_PERI.
 #endif
             static let AUXSRC_XOSC: UInt32 = 0b100 << 5 // Select XOSC for CLK_PERI.
         }
