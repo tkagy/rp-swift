@@ -11,9 +11,10 @@
 enum GPIO {
     private typealias register = RP2.Register32
     private typealias spec = Chip.GPIO
-    // Raw values identify supported-function bits, not hardware FUNCSEL values.
+    // Raw values identify hardware-function bits, not hardware FUNCSEL values.
+    // TBD: ADC0 (GPIO26), ADC1 (GPIO27), ADC3 (GPIO29) pin configuration.
     enum Function: UInt32 {
-        case none = 0, custom, ADC2
+        case none = 0, sio, ADC2
         case uart0TX, uart0RX, uart0CTS, uart0RTS
         case uart1TX, uart1RX, uart1CTS, uart1RTS
         case spi0RX, spi0CS, spi0SCK, spi0TX
@@ -23,7 +24,7 @@ enum GPIO {
 
     enum DriveStrength: UInt32 { case mA2 = 0, mA4, mA8, mA12 }
     enum ErrorCode: Equatable {
-        case none, invalidPin, unsupportedFunction, notImplemented
+        case none, unsupportedFunction, notImplemented
         case pinInUse, resetDidNotComplete
     }
 
@@ -49,35 +50,34 @@ enum GPIO {
         }
     }
 
-    // Pin numbers are bits 0...29. Iteration yields numbers without allocating an Array.
+    // Pin numbers are bits 0...29. Iteration yields pins without allocating an Array.
     struct PinSet: Sequence {
         private var bits: UInt32 = 0
         init() {}
 
-        func contains(_ number: UInt32) -> Bool {
-            number < GPIO.pinCount && bits & (UInt32(1) << number) != 0
+        func contains(_ pin: Pin) -> Bool {
+            bits & (UInt32(1) << pin.number) != 0
         }
 
-        mutating func insert(_ number: UInt32) {
-            precondition(number < GPIO.pinCount)
-            bits |= UInt32(1) << number
+        mutating func insert(_ pin: Pin) {
+            bits |= UInt32(1) << pin.number
         }
 
         struct Iterator: IteratorProtocol {
             fileprivate var remaining: UInt32
-            mutating func next() -> UInt32? {
+            mutating func next() -> Pin? {
                 guard remaining != 0 else { return nil }
                 let number = UInt32(remaining.trailingZeroBitCount)
                 remaining &= remaining - 1
-                return number
+                return Pin(rawValue: number)
             }
         }
 
         func makeIterator() -> Iterator { Iterator(remaining: bits) }
     }
 
-    // Supported names are independent UInt32 flags. .none is a real member;
-    // an empty set [] means that no functions are supported.
+    // supportedFunctions lists hardware-supported functions, regardless of API implementation status.
+    // These are independent UInt32 flags; [] means no functions.
     struct SupportedFunctions: ExpressibleByArrayLiteral, Equatable {
         private var bits: UInt32 = 0
 
@@ -98,11 +98,61 @@ enum GPIO {
         var isEmpty: Bool { bits == 0 }
     }
 
-    struct Pin {
-        let number: UInt32
-        fileprivate init(number: UInt32) { self.number = number }
+    // Bank 0 pins shared by RP2040 and RP2350A; RP2350B is outside this scope.
+    enum Pin: UInt32 {
+        case  gpio0,  gpio1,  gpio2,  gpio3,  gpio4,  gpio5
+        case  gpio6,  gpio7,  gpio8,  gpio9, gpio10, gpio11
+        case gpio12, gpio13, gpio14, gpio15, gpio16, gpio17
+        case gpio18, gpio19, gpio20, gpio21, gpio22, gpio23
+        case gpio24, gpio25, gpio26, gpio27, gpio28, gpio29
 
-        var supportedFunctions: SupportedFunctions { GPIO.supportedFunctions(for: number) }
+        var number: UInt32 { rawValue }
+
+        // Shared supported uses.
+        // TBD: PWM, SIO input/output, PIO0/PIO1, CLOCK GPIN/GPOUT,
+        // and USB OVCUR DET/VBUS DET/VBUS EN. Chip-specific gaps are in Chip.GPIO.
+        var supportedFunctions: SupportedFunctions {
+            var functions: SupportedFunctions
+            switch self {
+            case .gpio0: functions = [.uart0TX, .i2c0SDA, .spi0RX, .sio]
+            case .gpio1: functions = [.uart0RX, .i2c0SCL, .spi0CS, .sio]
+            case .gpio2: functions = [.uart0CTS, .i2c1SDA, .spi0SCK, .sio]
+            case .gpio3: functions = [.uart0RTS, .i2c1SCL, .spi0TX, .sio]
+            case .gpio4: functions = [.uart1TX, .i2c0SDA, .spi0RX, .sio]
+            case .gpio5: functions = [.uart1RX, .i2c0SCL, .spi0CS, .sio]
+            case .gpio6: functions = [.uart1CTS, .i2c1SDA, .spi0SCK, .sio]
+            case .gpio7: functions = [.uart1RTS, .i2c1SCL, .spi0TX, .sio]
+            case .gpio8: functions = [.uart1TX, .i2c0SDA, .spi1RX, .sio]
+            case .gpio9: functions = [.uart1RX, .i2c0SCL, .spi1CS, .sio]
+            case .gpio10: functions = [.uart1CTS, .i2c1SDA, .spi1SCK, .sio]
+            case .gpio11: functions = [.uart1RTS, .i2c1SCL, .spi1TX, .sio]
+            case .gpio12: functions = [.uart0TX, .i2c0SDA, .spi1RX, .sio]
+            case .gpio13: functions = [.uart0RX, .i2c0SCL, .spi1CS, .sio]
+            case .gpio14: functions = [.uart0CTS, .i2c1SDA, .spi1SCK, .sio]
+            case .gpio15: functions = [.uart0RTS, .i2c1SCL, .spi1TX, .sio]
+            case .gpio16: functions = [.uart0TX, .i2c0SDA, .spi0RX, .sio]
+            case .gpio17: functions = [.uart0RX, .i2c0SCL, .spi0CS, .sio]
+            case .gpio18: functions = [.uart0CTS, .i2c1SDA, .spi0SCK, .sio]
+            case .gpio19: functions = [.uart0RTS, .i2c1SCL, .spi0TX, .sio]
+            case .gpio20: functions = [.uart1TX, .i2c0SDA, .spi0RX, .sio]
+            case .gpio21: functions = [.uart1RX, .i2c0SCL, .spi0CS, .sio]
+            case .gpio22: functions = [.uart1CTS, .i2c1SDA, .spi0SCK, .sio]
+            case .gpio23: functions = [.uart1RTS, .i2c1SCL, .spi0TX, .sio]
+            case .gpio24: functions = [.uart1TX, .i2c0SDA, .spi1RX, .sio]
+            case .gpio25: functions = [.uart1RX, .i2c0SCL, .spi1CS, .sio]
+            case .gpio26: functions = [.uart1CTS, .i2c1SDA, .spi1SCK, .sio]
+            case .gpio27: functions = [.uart1RTS, .i2c1SCL, .spi1TX, .sio]
+            case .gpio28: functions = [.uart0TX, .i2c0SDA, .spi1RX, .sio, .ADC2]
+            case .gpio29: functions = [.uart0RX, .i2c0SCL, .spi1CS, .sio]
+            }
+            let pinBit = UInt32(1) << number
+            if spec.uart0TXAuxPins & pinBit != 0 { functions.insert(.uart0TX) }
+            if spec.uart0RXAuxPins & pinBit != 0 { functions.insert(.uart0RX) }
+            if spec.uart1TXAuxPins & pinBit != 0 { functions.insert(.uart1TX) }
+            if spec.uart1RXAuxPins & pinBit != 0 { functions.insert(.uart1RX) }
+            return functions
+        }
+
         var currentFunction: Function { GPIO.currentFunctions[Int(number)] }
         var isInUse: Bool { currentFunction != .none }
 
@@ -117,8 +167,8 @@ enum GPIO {
         var pins: PinSet {
             var result = PinSet()
             for number in 0..<GPIO.pinCount {
-                if GPIO.supportedFunctions(for: number).contains(function) {
-                    result.insert(number)
+                if let pin = Pin(rawValue: number), pin.supports(function) {
+                    result.insert(pin)
                 }
             }
             return result
@@ -126,8 +176,11 @@ enum GPIO {
 
         var usedPins: PinSet {
             var result = PinSet()
+            guard function != .none else { return result }
             for number in 0..<GPIO.pinCount {
-                if GPIO.currentFunctions[Int(number)] == function { result.insert(number) }
+                if let pin = Pin(rawValue: number), pin.currentFunction == function {
+                    result.insert(pin)
+                }
             }
             return result
         }
@@ -150,50 +203,6 @@ enum GPIO {
     struct I2CPins {
         let sda: FunctionPins
         let scl: FunctionPins
-    }
-
-    // Shared supported uses. SIO/custom I/O and PIO operation remain TBD.
-    static func supportedFunctions(for number: UInt32) -> SupportedFunctions {
-        var functions: SupportedFunctions
-        switch number {
-        case 0: functions = [.none, .uart0TX, .i2c0SDA, .spi0RX, .custom]
-        case 1: functions = [.none, .uart0RX, .i2c0SCL, .spi0CS, .custom]
-        case 2: functions = [.none, .uart0CTS, .i2c1SDA, .spi0SCK, .custom]
-        case 3: functions = [.none, .uart0RTS, .i2c1SCL, .spi0TX, .custom]
-        case 4: functions = [.none, .uart1TX, .i2c0SDA, .spi0RX, .custom]
-        case 5: functions = [.none, .uart1RX, .i2c0SCL, .spi0CS, .custom]
-        case 6: functions = [.none, .uart1CTS, .i2c1SDA, .spi0SCK, .custom]
-        case 7: functions = [.none, .uart1RTS, .i2c1SCL, .spi0TX, .custom]
-        case 8: functions = [.none, .uart1TX, .i2c0SDA, .spi1RX, .custom]
-        case 9: functions = [.none, .uart1RX, .i2c0SCL, .spi1CS, .custom]
-        case 10: functions = [.none, .uart1CTS, .i2c1SDA, .spi1SCK, .custom]
-        case 11: functions = [.none, .uart1RTS, .i2c1SCL, .spi1TX, .custom]
-        case 12: functions = [.none, .uart0TX, .i2c0SDA, .spi1RX, .custom]
-        case 13: functions = [.none, .uart0RX, .i2c0SCL, .spi1CS, .custom]
-        case 14: functions = [.none, .uart0CTS, .i2c1SDA, .spi1SCK, .custom]
-        case 15: functions = [.none, .uart0RTS, .i2c1SCL, .spi1TX, .custom]
-        case 16: functions = [.none, .uart0TX, .i2c0SDA, .spi0RX, .custom]
-        case 17: functions = [.none, .uart0RX, .i2c0SCL, .spi0CS, .custom]
-        case 18: functions = [.none, .uart0CTS, .i2c1SDA, .spi0SCK, .custom]
-        case 19: functions = [.none, .uart0RTS, .i2c1SCL, .spi0TX, .custom]
-        case 20: functions = [.none, .uart1TX, .i2c0SDA, .spi0RX, .custom]
-        case 21: functions = [.none, .uart1RX, .i2c0SCL, .spi0CS, .custom]
-        case 22: return [.none, .custom]
-        case 23: functions = [.none, .uart1RTS, .i2c1SCL, .spi0TX, .custom]
-        case 24: functions = [.none, .uart1TX, .i2c0SDA, .spi1RX, .custom]
-        case 25: functions = [.none, .uart1RX, .i2c0SCL, .spi1CS, .custom]
-        case 26: functions = [.none, .uart1CTS, .i2c1SDA, .spi1SCK, .custom]
-        case 27: functions = [.none, .uart1RTS, .i2c1SCL, .spi1TX, .custom]
-        case 28: return [.none, .custom, .ADC2]
-        case 29: functions = [.none, .uart0RX, .i2c0SCL, .spi1CS, .custom]
-        default: return []
-        }
-        let pinBit = UInt32(1) << number
-        if spec.uart0TXAuxPins & pinBit != 0 { functions.insert(.uart0TX) }
-        if spec.uart0RXAuxPins & pinBit != 0 { functions.insert(.uart0RX) }
-        if spec.uart1TXAuxPins & pinBit != 0 { functions.insert(.uart1TX) }
-        if spec.uart1RXAuxPins & pinBit != 0 { functions.insert(.uart1RX) }
-        return functions
     }
 
     // RP2040 and RP2350A expose GPIO0...29; RP2350B is outside this scope.
@@ -224,27 +233,25 @@ enum GPIO {
     static var i2c1: I2CPins {
         .init(sda: .init(function: .i2c1SDA), scl: .init(function: .i2c1SCL))
     }
-    // TBD: selection and operation of custom (SIO) and PIO functions.
-    static var custom: FunctionPins { FunctionPins(function: .custom) }
+    // TBD: SIO input/output operations.
+    static var sio: FunctionPins { FunctionPins(function: .sio) }
 
     static func pin(_ number: UInt32) -> Pin? {
-        guard isValidPin(number) else { return nil }
-        return Pin(number: number)
+        Pin(rawValue: number)
     }
-    static func isValidPin(_ number: UInt32) -> Bool { number < pinCount }
+    static func isValidPin(_ number: UInt32) -> Bool { Pin(rawValue: number) != nil }
 
     @discardableResult
-    static func open(_ number: UInt32, as function: Function,
+    static func open(_ pin: Pin, as function: Function,
                      pad: PadConfig = PadConfig()) -> ErrorCode {
-        guard isValidPin(number) else { return .invalidPin }
-        guard supportedFunctions(for: number).contains(function) else {
+        let number = pin.number
+        guard function != .none else { return .unsupportedFunction }
+        guard pin.supports(function) else {
             return .unsupportedFunction
         }
         guard currentFunctions[Int(number)] == .none else { return .pinInUse }
-        // .none is an idle state; callers release a pin through close().
-        guard function != .none else { return .unsupportedFunction }
-        // TBD: custom digital I/O through SIO.
-        guard function != .custom else { return .notImplemented }
+        // TBD: SIO input/output operations.
+        guard function != .sio else { return .notImplemented }
         guard RP2.RESETS.release(Chip.Reset.ioBank0 | Chip.Reset.padsBank0) else {
             return .resetDidNotComplete
         }
@@ -268,8 +275,8 @@ enum GPIO {
 
     // Stop the peripheral before closing its pins; closing disables digital input/output.
     @discardableResult
-    static func close(_ number: UInt32) -> ErrorCode {
-        guard isValidPin(number) else { return .invalidPin }
+    static func close(_ pin: Pin) -> ErrorCode {
+        let number = pin.number
         guard currentFunctions[Int(number)] != .none else { return .none }
         guard RP2.RESETS.release(Chip.Reset.ioBank0 | Chip.Reset.padsBank0) else {
             return .resetDidNotComplete
@@ -288,7 +295,7 @@ enum GPIO {
         let auxiliaryPins: UInt32
         switch function {
         case .none, .ADC2: return IO_BANK0.FUNCSEL_NULL
-        case .custom: return IO_BANK0.FUNCSEL_SIO // SIO operation TBD.
+        case .sio: return IO_BANK0.FUNCSEL_SIO // SIO operation TBD.
         case .spi0RX, .spi0CS, .spi0SCK, .spi0TX,
              .spi1RX, .spi1CS, .spi1SCK, .spi1TX: return IO_BANK0.FUNCSEL_SPI
         case .uart0TX: auxiliaryPins = spec.uart0TXAuxPins

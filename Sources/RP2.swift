@@ -114,7 +114,7 @@ enum RP2 {
     static func initialize() -> Never {
         memory.initialize()
         clock.initialize(config: sysFreqConfig)
-        uart0.open(tx: 0, rx: 1, baudRate: 115_200)
+        uart0.open(tx: .gpio0, rx: .gpio1, baudRate: 115_200)
         if uart0.status != .none { faultHandler() }
         main()
     }

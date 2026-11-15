@@ -83,8 +83,8 @@ struct UART: ~Copyable {
 
     private(set) var status: ErrorCode = .none
     // A pin is retained as soon as its GPIO open succeeds.
-    private(set) var transmitPin: UInt32? = nil
-    private(set) var receivePin: UInt32? = nil
+    private(set) var transmitPin: GPIO.Pin? = nil
+    private(set) var receivePin: GPIO.Pin? = nil
     // Requested baud rate; the hardware divider may introduce rounding error.
     private(set) var baudRate: UInt32? = nil
     private let port: Port
@@ -150,7 +150,7 @@ struct UART: ~Copyable {
     /// Acquire unused TX/RX pins and start the UART. Inspect status for errors.
     /// Call close to release acquired pins, including after a failed open.
     /// Call close before changing pins or opening this UART again.
-    mutating func open(tx: UInt32, rx: UInt32, baudRate: UInt32) {
+    mutating func open(tx: GPIO.Pin, rx: GPIO.Pin, baudRate: UInt32) {
         guard transmitPin == nil, receivePin == nil else {
             status = .pinsInUse
             return
@@ -180,7 +180,7 @@ struct UART: ~Copyable {
         }
         status = .none
 
-        // GPIO owns pin-number, capability and usage validation.
+        // GPIO owns capability and usage validation.
         // Acquired pins remain held on failure until the caller calls close().
         let txError = GPIO.open(tx, as: config.tx, pad: .init(PDE: true))
         guard txError == .none else {

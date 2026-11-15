@@ -53,7 +53,8 @@ enum RP2350 {
         static let uart0RXAuxPins: UInt32 = (1 << 3) | (1 << 15) | (1 << 19)
         static let uart1TXAuxPins: UInt32 = (1 << 6) | (1 << 10) | (1 << 22) | (1 << 26)
         static let uart1RXAuxPins: UInt32 = (1 << 7) | (1 << 11) | (1 << 23) | (1 << 27)
-        // TBD: PIO and other RP2350-specific peripheral functions.
+        // TBD: HSTX (F0), PIO2 (F8), and CoreSight TRACECLK/TRACEDATA
+        // and QMI CS1n (F9). CLOCK routes also differ from RP2040.
     }
 
     enum UART0 {
