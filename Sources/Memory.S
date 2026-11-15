@@ -1,14 +1,17 @@
 // Copyright (c) 2026 tkagy <248091500+tkagy@users.noreply.github.com>
 // SPDX-License-Identifier: MIT
 
+#if defined(__arm__)
 .syntax unified
 .thumb
-
 #if defined(RP2040) == defined(RP2350)
 #error "Choose exactly one assembly target: RP2040 or RP2350"
 #endif
+#elif !defined(__aarch64__) && !defined(__x86_64__)
+#error "Unsupported architecture for volatile 32-bit access"
+#endif
 
-#if RP2040
+#if defined(RP2040) && defined(__arm__)
 // Compiler atomic ABI for aligned 32-bit normal RAM, used by Embedded Swift's
 // once-only initialization. All requested orders are conservatively implemented
 // as sequentially consistent.
@@ -125,3 +128,48 @@ __atomic_fetch_sub_4:
 // End function: __atomic_fetch_sub_4.
 .ltorg
 #endif
+
+// Each opaque C ABI call performs one aligned 32-bit load or store.
+// Both chips place these routines in SRAM. Native variants support host tests.
+// No CPU memory barrier or locking is implied.
+.section .text.memory_volatile_load32,"ax",%progbits
+.p2align 2
+.global memory_volatile_load32
+.type memory_volatile_load32,%function
+#if defined(__arm__)
+.thumb_func
+#endif
+memory_volatile_load32:
+#if defined(__arm__)
+    ldr r0, [r0]
+    bx lr
+#elif defined(__aarch64__)
+    ldr w0, [x0]
+    ret
+#elif defined(__x86_64__)
+    movl (%rdi), %eax
+    ret
+#endif
+.size memory_volatile_load32, .-memory_volatile_load32
+
+.section .text.memory_volatile_store32,"ax",%progbits
+.p2align 2
+.global memory_volatile_store32
+.type memory_volatile_store32,%function
+#if defined(__arm__)
+.thumb_func
+#endif
+memory_volatile_store32:
+#if defined(__arm__)
+    str r1, [r0]
+    bx lr
+#elif defined(__aarch64__)
+    str w1, [x0]
+    ret
+#elif defined(__x86_64__)
+    movl %esi, (%rdi)
+    ret
+#endif
+.size memory_volatile_store32, .-memory_volatile_store32
+
+.section .note.GNU-stack,"",%progbits

@@ -122,6 +122,17 @@ SECTIONS {
         LONG(PICOBIN_BLOCK_MARKER_END)
     } > FLASH
 
+    /* RAM-resident functions keep their load image in flash after IMAGE_DEF.
+       Collect these sections before the broad .text wildcard below. */
+    .ramfunc : ALIGN(4) {
+        __ramfunc_start = .;
+        KEEP(*(.ramfunc .ramfunc.*))
+        KEEP(*(.text.memory_volatile_load32 .text.memory_volatile_store32))
+        . = ALIGN(4);
+        __ramfunc_end = .;
+    } > RAM AT> FLASH
+    __ramfunc_load_start = LOADADDR(.ramfunc);
+
     /* Place executable code and read-only constants in flash. */
     .text : ALIGN(4) {
         *(.text .text.*)
@@ -163,6 +174,15 @@ SECTIONS {
        Startup must not clear or overwrite the stack it is already using. */
     ASSERT(__bss_end <= STACK_TOP - STACK_RESERVED_BYTES,
            "RAM globals overlap the reserved 4 KiB stack")
+
+    ASSERT(__ramfunc_end > __ramfunc_start,
+           "RP2350 RAM functions must be linked into RAM")
+    ASSERT(memory_volatile_load32 >= ORIGIN(RAM) &&
+           memory_volatile_load32 < ORIGIN(RAM) + LENGTH(RAM),
+           "RP2350 volatile load must execute from RAM")
+    ASSERT(memory_volatile_store32 >= ORIGIN(RAM) &&
+           memory_volatile_store32 < ORIGIN(RAM) + LENGTH(RAM),
+           "RP2350 volatile store must execute from RAM")
 
     /* Four bytes per word: detect missing core exception or external IRQ entries. */
     ASSERT(SIZEOF(.vectors) == (16 + 52) * 4, "Unexpected RP2350 vector table size")

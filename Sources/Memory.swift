@@ -1,22 +1,34 @@
 // Copyright (c) 2026 tkagy <248091500+tkagy@users.noreply.github.com>
 // SPDX-License-Identifier: MIT
 
-// RAM startup and compiler-generated memory operations.
+// RAM startup, compiler-generated memory operations, and volatile access.
 // Supply the memory helper calls emitted by Swift/LLVM in Swift, adding ABI entry
 // points as needed instead of linking external memory-helper libraries.
-// Sources may be RAM or XIP flash; destinations must be writable RAM. These
-// operations do not provide the access guarantees required by peripheral registers.
+// Copy/fill operate on normal RAM and XIP data. Use the volatile accessors for
+// hardware registers and reads whose side effects must not be optimized away.
 // Arm Run-time ABI, 5.3.4: https://github.com/ARM-software/abi-aa/blob/main/rtabi32/rtabi32.rst
 
 enum Memory {
+    // Memory.S performs one aligned 32-bit access, even if the result is discarded.
+    // These operations provide neither atomic read-modify-write nor CPU barriers.
+    @_extern(c, "memory_volatile_load32")
+    static func volatileLoad32(_ pointer: UnsafePointer<UInt32>) -> UInt32
+
+    @_extern(c, "memory_volatile_store32")
+    static func volatileStore32(_ pointer: UnsafeMutablePointer<UInt32>, _ value: UInt32)
+
     // Configs/rp2040.ld and Configs/rp2350.ld define these section boundaries.
-    // The .data load address is in flash; the .data and .bss ranges are in RAM.
+    // Load images for .data and .ramfunc are in flash; their runtime ranges
+    // and .bss are in RAM.
     // End addresses are exclusive. These symbols identify addresses, not stored values.
     @_extern(c, "__data_load_start") private static var dataLoadStart: UInt32
     @_extern(c, "__data_start") private static var dataStart: UInt32
     @_extern(c, "__data_end") private static var dataEnd: UInt32
     @_extern(c, "__bss_start") private static var bssStart: UInt32
     @_extern(c, "__bss_end") private static var bssEnd: UInt32
+    @_extern(c, "__ramfunc_load_start") private static var ramfuncLoadStart: UInt32
+    @_extern(c, "__ramfunc_start") private static var ramfuncStart: UInt32
+    @_extern(c, "__ramfunc_end") private static var ramfuncEnd: UInt32
 
     // Run once from RP2.reset(), before main accesses stored globals or statics.
     // The stack is already available. copy/set depend only on arguments and
@@ -32,6 +44,15 @@ enum Memory {
             UnsafeMutableRawPointer(bitPattern: data)!,
             UnsafeRawPointer(bitPattern: address(of: &dataLoadStart))!,
             address(of: &dataEnd) - data
+        )
+
+        // Copy RAM-resident functions before peripheral access or XIP changes.
+        // Flash is still readable while their load image is copied into SRAM.
+        let ramfunc = address(of: &ramfuncStart)
+        _ = copy(
+            UnsafeMutableRawPointer(bitPattern: ramfunc)!,
+            UnsafeRawPointer(bitPattern: address(of: &ramfuncLoadStart))!,
+            address(of: &ramfuncEnd) - ramfunc
         )
     }
 

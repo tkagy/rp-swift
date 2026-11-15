@@ -41,23 +41,11 @@ enum RP2 {
         let address: UInt32
         private let pointer: UnsafeMutablePointer<UInt32>
 
-        // Access hardware on every read or write. Keep these accessors out of
-        // optimized callers; ordinary Swift pointer accesses are not volatile.
-        // Pointer construction stays in the optimized initializer, keeping the actual
-        // non-elidable load/store short enough for time-sensitive peripheral polling.
-        // These accessors do not provide locking or shared-memory synchronization.
+        // Memory.S performs one 32-bit hardware access per call, even if a
+        // loaded value is discarded. This does not provide locking or CPU barriers.
         var value: UInt32 {
-            @inline(never)
-            @_optimize(none)
-            get {
-                return pointer.pointee
-            }
-            @inline(never)
-            @_optimize(none)
-            nonmutating set {
-                // Write to the hardware address without changing this Register32 value.
-                pointer.pointee = newValue
-            }
+            get { Memory.volatileLoad32(pointer) }
+            nonmutating set { Memory.volatileStore32(pointer, newValue) }
         }
 
         init(address: UInt32) {
