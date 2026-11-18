@@ -242,19 +242,26 @@ enum GPIO {
     }
     static func isValidPin(_ number: UInt32) -> Bool { Pin(rawValue: number) != nil }
 
-    static func open(_ pin: Pin, as function: Function,
-                     pad: PadConfig = PadConfig()) -> ErrorCode {
-        let number = pin.number
+    // Check pin assignment without changing GPIO state.
+    static func validateOpen(_ pin: Pin, as function: Function) -> ErrorCode {
         guard function != .none else { return .unsupportedFunction }
         guard pin.supports(function) else {
             return .unsupportedFunction
         }
-        guard currentFunctions[Int(number)] == .none else { return .pinInUse }
+        guard !pin.isInUse else { return .pinInUse }
         // TBD: SIO input/output operations.
         guard function != .sio else { return .notImplemented }
+        return .none
+    }
+
+    static func open(_ pin: Pin, as function: Function,
+                     pad: PadConfig = PadConfig()) -> ErrorCode {
+        let error = validateOpen(pin, as: function)
+        guard error == .none else { return error }
         guard RP2.RESETS.release(Chip.Reset.ioBank0 | Chip.Reset.padsBank0) else {
             return .resetDidNotComplete
         }
+        let number = pin.number
         let control = IO_BANK0.control(number)
         let padRegister = PADS_BANK0.gpio(number)
         control.value = IO_BANK0.FUNCSEL_NULL

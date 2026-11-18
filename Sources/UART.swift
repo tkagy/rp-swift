@@ -147,7 +147,8 @@ struct UART: ~Copyable {
     }
 
     /// Acquire unused TX/RX pins and start the UART. Returns the operation's error.
-    /// Call close to release acquired pins, including after a failed open.
+    /// Pin validation errors leave both pins and the port unclaimed.
+    /// Call close if a hardware error leaves pins acquired.
     /// Call close before changing pins or opening this UART again.
     mutating func open(tx: GPIO.Pin, rx: GPIO.Pin, baudRate: UInt32) -> ErrorCode {
         guard transmitPin == nil, receivePin == nil else {
@@ -174,8 +175,11 @@ struct UART: ~Copyable {
             return .invalidBaudRate
         }
 
-        // GPIO owns capability and usage validation.
-        // Acquired pins remain held on failure until the caller calls close().
+        let txValidation = GPIO.validateOpen(tx, as: config.tx)
+        guard txValidation == .none else { return .gpio(txValidation) }
+        let rxValidation = GPIO.validateOpen(rx, as: config.rx)
+        guard rxValidation == .none else { return .gpio(rxValidation) }
+
         let txError = GPIO.open(tx, as: config.tx, pad: .init(PDE: true))
         guard txError == .none else {
             return .gpio(txError)
