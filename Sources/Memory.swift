@@ -85,44 +85,31 @@ enum Memory {
         return destination
     }
 
-    /// Fill count bytes starting at destination with the same byte value.
-    /// RAM startup calls this with value = 0 to clear the entire .bss section.
-    /// Return the original destination pointer, matching C memset's return value.
+    /// Fill count bytes with the low byte of value and return destination, as memset does.
     @inline(never)
     static func set(_ destination: UnsafeMutableRawPointer, _ value: Int32, _ count: UInt) -> UnsafeMutableRawPointer {
-        // Number of bytes written so far; destination itself does not change.
         var index: UInt = 0
-
-        // Use only the lowest 8 bits of value, as memset does.
-        // For example, 0x123 becomes the byte 0x23.
         let byte = UInt8(truncatingIfNeeded: value)
 
-        // Repeat that byte four times so one 32-bit store fills four bytes.
-        // For example, byte = 0xAB produces word = 0xABABABAB.
-        // Clearing RAM uses byte = 0, so word is also zero.
+        // Repeat the byte across all four bytes of a word.
         let word = UInt32(byte) * 0x01010101
 
-        // 1. Write individual bytes until the address is a multiple of four.
-        // Cortex-M0+ requires this alignment before we can store a UInt32.
-        // Stop early if we have already filled all count bytes.
+        // Fill leading bytes to align word stores on Cortex-M0+.
         while index < count && (UInt(bitPattern: destination) &+ index) & 3 != 0 {
             setByte(destination.advanced(by: Int(index)), byte)
             index &+= 1
         }
 
-        // 2. Fill four bytes per store while at least four bytes remain.
         while count - index >= 4 {
             setWord(destination.advanced(by: Int(index)), word)
             index &+= 4
         }
 
-        // 3. Fill any remaining bytes individually (at most three).
         while index < count {
             setByte(destination.advanced(by: Int(index)), byte)
             index &+= 1
         }
 
-        // Return where the fill started, not the address after the last byte.
         return destination
     }
 

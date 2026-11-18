@@ -9,6 +9,11 @@
 // https://datasheets.raspberrypi.com/rp2350/rp2350-datasheet.pdf
 // Calls that change pin assignments must be serialized by the caller.
 enum GPIO {
+    enum ErrorCode: Equatable {
+        case none, unsupportedFunction, notImplemented
+        case pinInUse, resetDidNotComplete
+    }
+
     private typealias register = RP2.Register32
     private typealias spec = Chip.GPIO
     // Raw values identify hardware-function bits, not hardware FUNCSEL values.
@@ -23,10 +28,6 @@ enum GPIO {
     }
 
     enum DriveStrength: UInt32 { case mA2 = 0, mA4, mA8, mA12 }
-    enum ErrorCode: Equatable {
-        case none, unsupportedFunction, notImplemented
-        case pinInUse, resetDidNotComplete
-    }
 
     // Electrical characteristics of the physical pin, independent of its peripheral.
     struct PadConfig {

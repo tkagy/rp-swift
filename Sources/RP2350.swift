@@ -32,10 +32,6 @@ enum RP2350 {
         static let padsBank0: UInt32 = 1 << 9
     }
 
-    enum SysInfo {
-        static let base: UInt32 = 0x4000_0000
-    }
-
     enum GPIO {
         // RP2350A (QFN60), GPIO0...29. Common pin information is in GPIO.swift.
         enum IO_BANK0 {
