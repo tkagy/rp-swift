@@ -149,12 +149,11 @@ enum Clock {
             mask: CLOCKS.CLK_PERI_CTRL.ENABLED, value: 0)
 #endif
 #if RP2040
-        // RP2040 datasheet 2.15.3.1: CLK_PERI supports up to 133 MHz.
-        // Section 2.15.3.2 requires 2 source cycles; wait 4 as a 2x margin.
-        // SYS runs from the 12 MHz crystal; round up for a partial source cycle.
-        let maxClkPeriFreqMHz: UInt64 = 133
+        // RP2040 datasheet 2.15.3.2 requires 2 source cycles; use 4 for margin.
+        // Round up because the source clock may end partway through a cycle.
         let peripheralClockStopWaitCycles: UInt64 = 4
-        let scaledWaitCycles = maxClkPeriFreqMHz * peripheralClockStopWaitCycles
+        let scaledWaitCycles = Chip.Clock.maxPeripheralFreqMHz
+            * peripheralClockStopWaitCycles
         let readCount =
             (scaledWaitCycles + UInt64(crystalFreqMHz) - 1) / UInt64(crystalFreqMHz)
         for _ in 0..<readCount {

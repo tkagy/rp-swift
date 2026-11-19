@@ -27,6 +27,8 @@ enum RP2040 {
         static let base: UInt32 = 0x4000_8000
         static let dividerIntegerShift: UInt32 = 8
         static let resuscitationOffset: UInt32 = 0x78
+        // RP2040 datasheet 2.15.3.1: CLK_PERI maximum frequency.
+        static let maxPeripheralFreqMHz: UInt64 = 133
     }
 
     enum Reset {
