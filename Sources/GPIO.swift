@@ -39,6 +39,10 @@ enum GPIO {
         var SCHMITT = true                  // Schmitt trigger enable for the input.
         var SLEWFAST = false                // Fast output slew rate enable.
 
+        fileprivate static var digitalDisabled: Self {
+            Self(IE: false, OD: true, SCHMITT: false)
+        }
+
         fileprivate var value: UInt32 {
             var value = DRIVE.rawValue << PadFields.DRIVE_SHIFT
             if IE { value |= PadFields.IE }
@@ -268,10 +272,7 @@ enum GPIO {
         if function == .ADC2 {
             // Prepare only the analog pin; the ADC driver controls conversion/channel 2.
             // A complete write also clears RP2350's ISO bit.
-            padRegister.value = PadConfig(
-                IE: false, OD: true,
-                SCHMITT: false
-            ).value
+            padRegister.value = PadConfig.digitalDisabled.value
         } else {
             padRegister.value = pad.value
             control.value = funcsel(for: number, function: function)
@@ -288,10 +289,7 @@ enum GPIO {
             return .resetDidNotComplete
         }
         IO_BANK0.control(number).value = IO_BANK0.FUNCSEL_NULL
-        PADS_BANK0.gpio(number).value = PadConfig(
-            IE: false, OD: true,
-            SCHMITT: false
-        ).value
+        PADS_BANK0.gpio(number).value = PadConfig.digitalDisabled.value
         currentFunctions[Int(number)] = .none
         return .none
     }
