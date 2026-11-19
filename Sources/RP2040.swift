@@ -150,7 +150,7 @@ enum RP2040 {
             let status = RegPtrRO(bitPattern: UInt(SSI.base + Register.status))!
             let verificationAddress: RegPtrRO
             let commandAddress: UInt32
-            let expectedValue: UInt32 = 0x0777_0777
+            let expectedValue: UInt32
             let expectedSerialValue: UInt32
             let busy: UInt32 = 1 << 0
             let receiveNotEmpty: UInt32 = 1 << 3
@@ -181,6 +181,8 @@ enum RP2040 {
                 let flashAddressMask: UInt32 = 0x00ff_ffff
                 let modeByteShift: UInt32 = 8
                 commandAddress = (probeAddress & flashAddressMask) << modeByteShift
+                // Read the baseline through uncached XIP while Standard Read is active.
+                expectedValue = Memory.volatileLoad32(verificationAddress)
                 // RP2040 datasheet 4.10.3:
                 // XIP swaps bytes for the CPU; FIFO reads retain wire byte order.
                 expectedSerialValue = expectedValue.byteSwapped
