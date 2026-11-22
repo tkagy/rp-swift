@@ -140,9 +140,6 @@ SECTIONS {
         . = ALIGN(4);
     } > FLASH
 
-    /* ARM EHABI unwind index; separate from RP-specific boot metadata. */
-    .ARM.exidx : { *(.ARM.exidx*) } > FLASH
-
     /* The Global Offset Table (GOT) contains addresses used by Swift to find
        external symbols. Static linking fixes these addresses, so keep the table
        in flash where startup can read it before RAM has been initialized. */
@@ -168,8 +165,11 @@ SECTIONS {
         __bss_end = .;
     } > RAM
 
-    /* Discard unused notes, Swift module hashes, and autolink directives. */
-    /DISCARD/ : { *(.comment) *(.note*) *(.swift_modhash) *(.swift1_autolink_entries) }
+    /* This firmware does not unwind the stack, so discard generated unwind entries. */
+    /DISCARD/ : {
+        *(.ARM.exidx*)
+        *(.comment) *(.note*) *(.swift_modhash) *(.swift1_autolink_entries)
+    }
     /* Keep initialized globals below the reserved stack area.
        Startup must not clear or overwrite the stack it is already using. */
     ASSERT(__bss_end <= STACK_TOP - STACK_RESERVED_BYTES,

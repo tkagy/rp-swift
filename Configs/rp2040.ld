@@ -105,9 +105,6 @@ SECTIONS {
         . = ALIGN(4);
     } > FLASH
 
-    /* ARM EHABI unwind index; separate from RP-specific boot metadata. */
-    .ARM.exidx : { *(.ARM.exidx*) } > FLASH
-
     /* Static linking resolves these read-only data relocations before flashing.
        Keep Swift constant arrays and their pointer tables out of RAM. */
     .data.rel.ro : ALIGN(4) { *(.data.rel.ro .data.rel.ro.*) } > FLASH
@@ -137,8 +134,11 @@ SECTIONS {
         __bss_end = .;
     } > RAM
 
-    /* Discard unused notes, Swift module hashes, and autolink directives. */
-    /DISCARD/ : { *(.comment) *(.note*) *(.swift_modhash) *(.swift1_autolink_entries) }
+    /* This firmware does not unwind the stack, so discard generated unwind entries. */
+    /DISCARD/ : {
+        *(.ARM.exidx*)
+        *(.comment) *(.note*) *(.swift_modhash) *(.swift1_autolink_entries)
+    }
     /* Keep initialized globals below the reserved stack area.
        Startup must not clear or overwrite the stack it is already using. */
     ASSERT(__bss_end <= STACK_TOP - STACK_RESERVED_BYTES,
